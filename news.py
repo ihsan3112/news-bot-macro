@@ -1,9 +1,6 @@
 import os
-import re
 import time
-import html
 from datetime import datetime, timezone
-from typing import List, Dict, Tuple, Optional
 
 import requests
 from deep_translator import GoogleTranslator
@@ -12,12 +9,12 @@ from deep_translator import GoogleTranslator
 # =========================================================
 # CONFIG
 # =========================================================
-NEWS_API_KEY = os.getenv("d731f728bb10403799a7a14bea6ac0f6")
-TELEGRAM_BOT_TOKEN = os.getenv("8184173057:AAFxfvVPUpwovWHP3LPnZMlblqQy-E96sGA")
-TELEGRAM_CHAT_ID = os.getenv("78066114019")
+NEWS_API_KEY = os.getenv("NEWS_API_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-CHECK_INTERVAL = 1800  # 30 menit
-PAGE_SIZE = 40
+CHECK_INTERVAL = 1800 # test dulu 60 detik. nanti kalau sudah oke ubah ke 1800
+PAGE_SIZE = 20
 
 FRESH_NEWS_AGE_MINUTES = 360    # 6 jam
 OK_NEWS_AGE_MINUTES = 1440      # 24 jam
@@ -25,60 +22,16 @@ MAX_NEWS_AGE_MINUTES = 2880     # 48 jam
 
 ENABLE_TELEGRAM = True
 ENABLE_TRANSLATE = True
+DEBUG_MODE = True
 
-QUERY = (
-    '"donald trump" OR trump OR "white house" OR "jd vance" OR '
-    'fed OR fomc OR powell OR inflation OR cpi OR ppi OR pce OR '
-    '"interest rates" OR recession OR war OR conflict OR missile OR attack OR '
-    'ceasefire OR truce OR iran OR israel OR ukraine OR russia OR '
-    'oil OR opec OR hormuz OR bitcoin OR btc OR crypto OR etf OR liquidation OR whale'
-)
+QUERY = "trump OR iran OR bitcoin OR fed"
 
-STRONG_SOURCE_IDS = {
-    "reuters",
-    "bloomberg",
-    "associated-press",
-    "cnn",
-    "cnbc",
-    "financial-times",
-    "the-wall-street-journal",
-    "abc-news",
-    "al-jazeera-english",
-    "business-insider",
-}
 
-STRONG_SOURCE_NAMES = {
-    "reuters",
-    "bloomberg",
-    "associated press",
-    "cnn",
-    "cnbc",
-    "financial times",
-    "the wall street journal",
-    "abc news",
-    "al jazeera english",
-    "business insider",
-    "marketwatch",
-    "coindesk",
-    "cointelegraph",
-    "the block",
-    "forbes",
-    "yahoo finance",
-    "barron's",
-}
-
-BLOCKED_SOURCE_NAMES = {
-    "globenewswire",
-}
-
-NOISE_KEYWORDS = [
-    "movie", "film", "gaming", "game", "celebrity", "fashion", "music",
-    "tv show", "netflix", "iphone", "android phone", "gadget",
-    "murder", "robbery", "helicopter", "badminton", "cricket"
-]
-
+# =========================================================
+# KEYWORDS
+# =========================================================
 TRUMP_KEYWORDS = [
-    "trump", "donald trump", "white house", "president trump", "jd vance", "vance"
+    "trump", "donald trump", "white house", "jd vance", "vance"
 ]
 
 FED_KEYWORDS = [
@@ -97,6 +50,13 @@ CRYPTO_KEYWORDS = [
     "bitcoin", "btc", "crypto", "etf", "liquidation",
     "exchange", "stablecoin", "whale",
 ]
+
+NOISE_KEYWORDS = [
+    "movie", "film", "gaming", "game", "celebrity", "fashion", "music",
+    "tv show", "netflix", "iphone", "android phone", "gadget",
+    "murder", "robbery", "helicopter", "badminton", "cricket"
+]
+
 
 seen_titles = set()
 sent_titles = set()
@@ -155,6 +115,7 @@ def kirim_telegram(pesan: str) -> None:
         "chat_id": TELEGRAM_CHAT_ID,
         "text": pesan,
     }
+
     try:
         requests.post(url, data=data, timeout=20)
     except Exception as e:
@@ -203,17 +164,6 @@ def freshness_info(minutes_old: int):
     return "LAMA <= 48 JAM", C.GRAY
 
 
-def source_strength(source_id: str, source_name: str) -> int:
-    sid = (source_id or "").lower().strip()
-    sname = (source_name or "").lower().strip()
-
-    if sname in BLOCKED_SOURCE_NAMES:
-        return -2
-    if sid in STRONG_SOURCE_IDS or sname in STRONG_SOURCE_NAMES:
-        return 2
-    return 0
-
-
 # =========================================================
 # LOGIC
 # =========================================================
@@ -222,11 +172,9 @@ def bukan_noise(text: str) -> bool:
     return not any(k in t for k in NOISE_KEYWORDS)
 
 
-def score_berita(title: str, description: str = "", source_id: str = "", source_name: str = "") -> int:
+def score_berita(title: str, description: str = "") -> int:
     t = f"{title} {description}".lower()
     score = 0
-
-    score += source_strength(source_id, source_name)
 
     if any(k in t for k in TRUMP_KEYWORDS):
         score += 4
@@ -240,9 +188,9 @@ def score_berita(title: str, description: str = "", source_id: str = "", source_
     return score
 
 
-def kategori_berita(title: str, description: str = "", source_id: str = "", source_name: str = ""):
+def kategori_berita(title: str, description: str = ""):
     t = f"{title} {description}".lower()
-    score = score_berita(title, description, source_id, source_name)
+    score = score_berita(title, description)
 
     if any(k in t for k in TRUMP_KEYWORDS) and any(k in t for k in WAR_KEYWORDS):
         return "TRUMP + PERANG", C.RED, max(score, 9)
@@ -276,14 +224,14 @@ def dampak_market(text: str):
             "wti": "cenderung naik",
             "emas": "cenderung naik",
             "status": "⚠️ WAIT / JANGAN ENTRY BURU-BURU",
-            "catatan": "Trump + perang = market cepat berubah. Tunggu konfirmasi candle.",
+            "catatan": "Trump + perang = market cepat berubah.",
         }
 
     if any(k in t for k in TRUMP_KEYWORDS) and any(k in t for k in ["ceasefire", "truce", "de-escalation", "hormuz"]):
         return {
             "btc": "berpotensi terbantu",
             "wti": "bisa melemah",
-            "emas": "bisa melemah / netral",
+            "emas": "bisa netral / melemah",
             "status": "✅ PANTAU MOMENTUM RISK-ON",
             "catatan": "De-escalation biasanya meredakan fear market.",
         }
@@ -330,7 +278,7 @@ def dampak_market(text: str):
             "wti": "tidak relevan",
             "emas": "tidak relevan",
             "status": "👀 PANTAU REAKSI BTC",
-            "catatan": "Arus besar/whale hanya konfirmasi tambahan, bukan dasar entry tunggal.",
+            "catatan": "Whale hanya konfirmasi tambahan, bukan dasar entry tunggal.",
         }
 
     return {
@@ -338,13 +286,46 @@ def dampak_market(text: str):
         "wti": "pantau",
         "emas": "pantau",
         "status": "• HANYA INFO",
-        "catatan": "Belum cukup kuat untuk dijadikan dasar keputusan sendiri.",
+        "catatan": "Belum cukup kuat untuk dasar keputusan sendiri.",
     }
 
 
 # =========================================================
-# FETCH NEWS
+# FETCH
 # =========================================================
+def fetch_everything():
+    if not NEWS_API_KEY:
+        print("DEBUG: NEWS_API_KEY kosong")
+        return []
+
+    url = "https://newsapi.org/v2/everything"
+    params = {
+        "apiKey": NEWS_API_KEY,
+        "q": QUERY,
+        "language": "en",
+        "sortBy": "publishedAt",
+        "pageSize": PAGE_SIZE,
+    }
+
+    try:
+        response = requests.get(url, params=params, timeout=20)
+        data = response.json()
+
+        if DEBUG_MODE:
+            print("DEBUG EVERYTHING STATUS:", data.get("status"))
+            print("DEBUG EVERYTHING TOTAL:", data.get("totalResults"))
+            if data.get("status") != "ok":
+                print("DEBUG EVERYTHING FULL:", data)
+
+        if data.get("status") != "ok":
+            return []
+
+        return data.get("articles", [])
+    except Exception as e:
+        print("DEBUG EVERYTHING ERROR:", e)
+        return []
+
+
 def fetch_top_headlines():
     if not NEWS_API_KEY:
         return []
@@ -356,35 +337,23 @@ def fetch_top_headlines():
         "category": "business",
         "pageSize": PAGE_SIZE,
     }
+
     try:
         response = requests.get(url, params=params, timeout=20)
         data = response.json()
+
+        if DEBUG_MODE:
+            print("DEBUG TOP STATUS:", data.get("status"))
+            print("DEBUG TOP TOTAL:", data.get("totalResults"))
+            if data.get("status") != "ok":
+                print("DEBUG TOP FULL:", data)
+
         if data.get("status") != "ok":
             return []
+
         return data.get("articles", [])
-    except Exception:
-        return []
-
-
-def fetch_everything():
-    if not NEWS_API_KEY:
-        return []
-
-    url = "https://newsapi.org/v2/everything"
-    params = {
-        "apiKey": NEWS_API_KEY,
-        "q": QUERY,
-        "language": "en",
-        "sortBy": "publishedAt",
-        "pageSize": PAGE_SIZE,
-    }
-    try:
-        response = requests.get(url, params=params, timeout=20)
-        data = response.json()
-        if data.get("status") != "ok":
-            return []
-        return data.get("articles", [])
-    except Exception:
+    except Exception as e:
+        print("DEBUG TOP ERROR:", e)
         return []
 
 
@@ -399,10 +368,15 @@ def ambil_berita():
         title = bersih(b.get("title", ""))
         url = bersih(b.get("url", ""))
         key = f"{title}|{url}"
+
         if not title or key in seen:
             continue
+
         seen.add(key)
         merged.append(b)
+
+    if DEBUG_MODE:
+        print("DEBUG MERGED COUNT:", len(merged))
 
     return merged
 
@@ -410,19 +384,7 @@ def ambil_berita():
 # =========================================================
 # FORMAT
 # =========================================================
-def print_berita(
-    kategori: str,
-    warna: str,
-    score: int,
-    freshness_label: str,
-    freshness_color: str,
-    judul_indo: str,
-    judul_asli: str,
-    source_name: str,
-    published_local: str,
-    umur_text: str,
-    effect: dict,
-) -> None:
+def print_berita(kategori, warna, score, freshness_label, freshness_color, judul_indo, judul_asli, source_name, published_local, umur_text, effect):
     print(warna + C.BOLD + f"\n[{kategori}] SCORE={score}" + C.RESET)
     print(freshness_color + f"Fresh  : {freshness_label}" + C.RESET)
     print(warna + f"Sumber : {source_name}" + C.RESET)
@@ -437,17 +399,7 @@ def print_berita(
     print(C.BLUE + f"Catatan: {effect['catatan']}" + C.RESET)
 
 
-def format_telegram_news(
-    kategori: str,
-    freshness_label: str,
-    judul_indo: str,
-    judul_asli: str,
-    source_name: str,
-    published_local: str,
-    umur_text: str,
-    url: str,
-    effect: dict,
-) -> str:
+def format_telegram_news(kategori, freshness_label, judul_indo, judul_asli, source_name, published_local, umur_text, url, effect):
     return (
         f"🚨 {kategori}\n\n"
         f"Status Waktu:\n{freshness_label}\n\n"
@@ -496,7 +448,6 @@ def main():
                 judul = bersih(b.get("title", ""))
                 desc = bersih(b.get("description", ""))
                 url = bersih(b.get("url", ""))
-                source_id = bersih((b.get("source") or {}).get("id", "")).lower()
                 source_name = bersih((b.get("source") or {}).get("name", "-"))
                 published_at_raw = b.get("publishedAt", "")
 
@@ -521,7 +472,6 @@ def main():
                     "judul": judul,
                     "desc": desc,
                     "url": url,
-                    "source_id": source_id,
                     "source_name": source_name,
                     "dt_pub": dt_pub,
                     "menit_umur": menit_umur,
@@ -539,7 +489,6 @@ def main():
                 judul = item["judul"]
                 desc = item["desc"]
                 url = item["url"]
-                source_id = item["source_id"]
                 source_name = item["source_name"]
                 dt_pub = item["dt_pub"]
                 menit_umur = item["menit_umur"]
@@ -559,22 +508,22 @@ def main():
                 else:
                     old_count += 1
 
-                kategori, warna, score = kategori_berita(judul, desc, source_id, source_name)
+                kategori, warna, score = kategori_berita(judul, desc)
                 judul_indo = translate(judul)
                 effect = dampak_market(f"{judul} {desc}")
 
                 print_berita(
-                    kategori=kategori,
-                    warna=warna,
-                    score=score,
-                    freshness_label=freshness_label,
-                    freshness_color=freshness_color,
-                    judul_indo=judul_indo,
-                    judul_asli=judul,
-                    source_name=source_name,
-                    published_local=published_local,
-                    umur_text=umur_text,
-                    effect=effect,
+                    kategori,
+                    warna,
+                    score,
+                    freshness_label,
+                    freshness_color,
+                    judul_indo,
+                    judul,
+                    source_name,
+                    published_local,
+                    umur_text,
+                    effect,
                 )
                 tampil += 1
 
@@ -588,15 +537,15 @@ def main():
                     "PERHATIAN",
                 ] and judul not in sent_titles:
                     pesan = format_telegram_news(
-                        kategori=kategori,
-                        freshness_label=freshness_label,
-                        judul_indo=judul_indo,
-                        judul_asli=judul,
-                        source_name=source_name,
-                        published_local=published_local,
-                        umur_text=umur_text,
-                        url=url,
-                        effect=effect,
+                        kategori,
+                        freshness_label,
+                        judul_indo,
+                        judul,
+                        source_name,
+                        published_local,
+                        umur_text,
+                        url,
+                        effect,
                     )
                     kirim_telegram(pesan)
                     sent_titles.add(judul)
