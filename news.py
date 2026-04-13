@@ -2,11 +2,11 @@ import os
 import json
 import time
 import hashlib
-from datetime import datetime, timezone, timedelta
-
 import requests
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from deep_translator import GoogleTranslator
-
 
 # =========================================================
 # CONFIG
@@ -15,143 +15,160 @@ NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-CHECK_INTERVAL = 1800   # 30 menit
-PAGE_SIZE = 20
-
-# umur berita
-FRESH_NEWS_AGE_MINUTES = 360     # 6 jam
-OK_NEWS_AGE_MINUTES = 1440       # 24 jam
-MAX_NEWS_AGE_MINUTES = 2880      # 48 jam
-
-# telegram hanya kirim berita <= 24 jam
-TELEGRAM_MAX_AGE_MINUTES = 1440
-
+CHECK_INTERVAL = 180       # 3 menit
+MAX_AGE_MINUTES = 240      # hanya <= 4 jam
+MAX_NEWS_ITEMS = 12
 ENABLE_TELEGRAM = True
 ENABLE_TRANSLATE = True
-DEBUG_MODE = False
 
-# simpan riwayat berita yang sudah pernah dikirim / diproses
-STATE_FILE = "news_state.json"
-STATE_KEEP_DAYS = 7
+SEEN_FILE = "seen_hybrid_news.json"
 
-QUERY = "trump OR iran OR bitcoin OR fed"
+# Query NewsAPI: fokus market mover
+NEWS_QUERY = (
+    '("trump" OR "white house" OR "cz" OR "binance" OR '
+    '"iran" OR "israel" OR "war" OR "missile" OR "attack" OR '
+    '"fed" OR "powell" OR "inflation" OR "interest rate" OR '
+    '"bitcoin" OR "btc" OR "etf" OR "liquidation" OR "whale" OR "sec")'
+)
 
+# Sumber media yang lebih layak
+ALLOWED_NEWS_SOURCES = {
+    "reuters",
+    "bloomberg",
+    "cnbc",
+    "financial times",
+    "the wall street journal",
+    "wall street journal",
+    "wsj",
+    "business insider",
+    "marketwatch",
+    "coindesk",
+    "cointelegraph",
+    "decrypt",
+    "the block",
+    "yahoo finance",
+    "barron's",
+    "axios",
+    "cnn",
+    "abc news",
+}
 
-# =========================================================
-# KEYWORDS
-# =========================================================
-TRUMP_KEYWORDS = [
-    "trump", "donald trump", "white house", "jd vance", "vance"
+# Akun Twitter/X whitelist
+# username tanpa @
+TWITTER_ELITE_USERS = [
+    "realDonaldTrump",
+    "WhiteHouse",
+    "binance",
+    "cz_binance",
+    "federalreserve",
+    "unusual_whales",
+    "WatcherGuru",
+    "tier10k",
 ]
 
-FED_KEYWORDS = [
-    "fed", "fomc", "powell", "federal reserve",
-    "interest rate", "rate hike", "rate cut",
-    "cpi", "ppi", "pce", "inflation", "hawkish", "dovish",
+# Nitter RSS fallback instances
+NITTER_INSTANCES = [
+    "https://nitter.poast.org",
+    "https://nitter.privacydev.net",
+    "https://nitter.1d4.us",
 ]
 
-WAR_KEYWORDS = [
-    "war", "conflict", "attack", "missile", "airstrike", "retaliation",
-    "ceasefire", "truce", "de-escalation", "iran", "israel",
-    "ukraine", "russia", "hormuz", "strait of hormuz", "oil", "opec",
+# Keyword penting
+FAST_KEYWORDS = [
+    "trump", "white house", "cz", "binance",
+    "iran", "israel", "war", "missile", "attack", "retaliation",
+    "ceasefire", "truce", "hormuz", "oil", "opec",
+    "fed", "fomc", "powell", "inflation", "interest rate", "rate cut", "rate hike",
+    "bitcoin", "btc", "crypto", "etf", "liquidation", "whale", "sec", "tariff", "sanction"
 ]
 
-CRYPTO_KEYWORDS = [
-    "bitcoin", "btc", "crypto", "etf", "liquidation",
-    "exchange", "stablecoin", "whale",
+# Keyword yang sering noise
+BLACKLIST_KEYWORDS = [
+    "sports", "football", "basketball", "baseball", "volleyball",
+    "movie", "film", "music", "celebrity", "fashion", "recipe",
+    "iphone", "android", "car review", "auto show", "pypi", "python package"
 ]
-
-NOISE_KEYWORDS = [
-    "movie", "film", "gaming", "game", "celebrity", "fashion", "music",
-    "tv show", "netflix", "iphone", "android phone", "gadget",
-    "murder", "robbery", "helicopter", "badminton", "cricket"
-]
-
-
-# =========================================================
-# WARNA TERMINAL
-# =========================================================
-class C:
-    RED = "\033[91m"
-    GREEN = "\033[92m"
-    YELLOW = "\033[93m"
-    BLUE = "\033[94m"
-    MAGENTA = "\033[95m"
-    CYAN = "\033[96m"
-    WHITE = "\033[97m"
-    GRAY = "\033[90m"
-    BOLD = "\033[1m"
-    RESET = "\033[0m"
 
 
 # =========================================================
 # STATE
 # =========================================================
-def load_state():
-    if not os.path.exists(STATE_FILE):
-        return {"sent": {}, "seen": {}}
-
+def load_seen():
     try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if not isinstance(data, dict):
-                return {"sent": {}, "seen": {}}
-            data.setdefault("sent", {})
-            data.setdefault("seen", {})
-            return data
+        with open(SEEN_FILE, "r", encoding="utf-8") as f:
+            return set(json.load(f))
     except Exception:
-        return {"sent": {}, "seen": {}}
+        return set()
 
 
-def save_state(state):
+def save_seen(seen):
     try:
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
+        with open(SEEN_FILE, "w", encoding="utf-8") as f:
+            json.dump(list(seen), f, ensure_ascii=False, indent=2)
     except Exception:
         pass
 
 
-def prune_state(state):
-    cutoff = datetime.now(timezone.utc) - timedelta(days=STATE_KEEP_DAYS)
-    cutoff_ts = cutoff.timestamp()
+# =========================================================
+# TELEGRAM
+# =========================================================
+def send_telegram(msg: str):
+    if not ENABLE_TELEGRAM:
+        return
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
 
-    for bucket in ["sent", "seen"]:
-        keys_to_delete = []
-        for k, ts in state.get(bucket, {}).items():
-            try:
-                if float(ts) < cutoff_ts:
-                    keys_to_delete.append(k)
-            except Exception:
-                keys_to_delete.append(k)
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": msg,
+    }
 
-        for k in keys_to_delete:
-            state[bucket].pop(k, None)
-
-
-STATE = load_state()
-prune_state(STATE)
-save_state(STATE)
+    try:
+        requests.post(url, json=payload, timeout=15)
+    except Exception:
+        pass
 
 
 # =========================================================
-# UTIL
+# UTILS
 # =========================================================
-def now() -> str:
-    return datetime.now().strftime("%H:%M:%S")
+def now_str():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def log(msg: str, color: str = C.WHITE) -> None:
-    print(f"{color}[{now()}] {msg}{C.RESET}")
+def normalize_text(text: str) -> str:
+    return " ".join((text or "").strip().split())
 
 
-def bersih(text: str) -> str:
-    if not text:
-        return ""
-    return " ".join(str(text).strip().split())
+def make_uid(source_type: str, source_name: str, title: str, url: str) -> str:
+    raw = f"{source_type}|{source_name}|{title}|{url}".lower().strip()
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def translate(text: str) -> str:
-    if not ENABLE_TRANSLATE or not text:
+def parse_newsapi_time(ts: str):
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def parse_rss_time(ts: str):
+    try:
+        return parsedate_to_datetime(ts).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def age_minutes(dt):
+    if dt is None:
+        return 999999
+    now = datetime.now(timezone.utc)
+    return int((now - dt.astimezone(timezone.utc)).total_seconds() // 60)
+
+
+def translate_text(text: str) -> str:
+    if not ENABLE_TRANSLATE:
         return text
     try:
         return GoogleTranslator(source="auto", target="id").translate(text)
@@ -159,505 +176,271 @@ def translate(text: str) -> str:
         return text
 
 
-def kirim_telegram(pesan: str) -> None:
-    if not ENABLE_TELEGRAM:
-        return
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    data = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": pesan,
-    }
-
-    try:
-        requests.post(url, data=data, timeout=20)
-    except Exception as e:
-        print(C.RED + f"Gagal kirim telegram: {e}" + C.RESET)
+def text_has_fast_keyword(text: str) -> bool:
+    t = (text or "").lower()
+    return any(k in t for k in FAST_KEYWORDS)
 
 
-def parse_published_at(published_at: str):
-    if not published_at:
-        return None
-    try:
-        return datetime.fromisoformat(published_at.replace("Z", "+00:00"))
-    except Exception:
-        return None
+def text_has_blacklist(text: str) -> bool:
+    t = (text or "").lower()
+    return any(k in t for k in BLACKLIST_KEYWORDS)
 
 
-def local_time_str(dt_utc) -> str:
-    if dt_utc is None:
-        return "-"
-    try:
-        return dt_utc.astimezone().strftime("%Y-%m-%d %H:%M:%S")
-    except Exception:
-        return "-"
+def classify_bias(text: str) -> str:
+    t = (text or "").lower()
 
+    short_hits = 0
+    long_hits = 0
 
-def age_minutes(dt_utc) -> int:
-    if dt_utc is None:
-        return 999999
-    now_utc = datetime.now(timezone.utc)
-    diff = now_utc - dt_utc.astimezone(timezone.utc)
-    return int(diff.total_seconds() // 60)
+    if any(x in t for x in ["war", "attack", "missile", "retaliation", "sanction", "tariff"]):
+        short_hits += 3
+    if any(x in t for x in ["iran", "israel", "hormuz", "oil spike", "opec cut"]):
+        short_hits += 2
+    if any(x in t for x in ["inflation hotter", "rate hike", "hawkish", "powell warns"]):
+        short_hits += 3
+    if any(x in t for x in ["liquidation", "sec sues", "exchange outflow pressure"]):
+        short_hits += 2
 
+    if any(x in t for x in ["ceasefire", "truce", "de-escalation"]):
+        long_hits += 3
+    if any(x in t for x in ["rate cut", "dovish", "cooling inflation"]):
+        long_hits += 3
+    if any(x in t for x in ["etf inflow", "etf approval", "institutional buying"]):
+        long_hits += 3
+    if any(x in t for x in ["binance settlement positive", "sec clarity", "whale accumulation"]):
+        long_hits += 2
 
-def age_str(minutes_old: int) -> str:
-    if minutes_old < 60:
-        return f"{minutes_old} menit"
-    jam = minutes_old // 60
-    menit = minutes_old % 60
-    return f"{jam}j {menit}m"
-
-
-def freshness_info(minutes_old: int):
-    if minutes_old <= FRESH_NEWS_AGE_MINUTES:
-        return "FRESH <= 6 JAM", C.GREEN
-    if minutes_old <= OK_NEWS_AGE_MINUTES:
-        return "LAYAK <= 24 JAM", C.YELLOW
-    return "LAMA <= 48 JAM", C.GRAY
-
-
-def make_article_key(title: str, url: str, source_name: str) -> str:
-    raw = f"{bersih(title).lower()}|{bersih(url).lower()}|{bersih(source_name).lower()}"
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-
-def normalize_title(title: str) -> str:
-    t = bersih(title).lower()
-    for ch in [",", ".", ":", ";", "!", "?", '"', "'"]:
-        t = t.replace(ch, "")
-    return t
+    if short_hits >= long_hits + 2 and short_hits >= 3:
+        return "SHORT BIAS"
+    if long_hits >= short_hits + 2 and long_hits >= 3:
+        return "LONG BIAS"
+    return "WARNING / PANTAU"
 
 
 # =========================================================
-# LOGIC
+# NEWSAPI FETCH
 # =========================================================
-def bukan_noise(text: str) -> bool:
-    t = text.lower()
-    return not any(k in t for k in NOISE_KEYWORDS)
-
-
-def score_berita(title: str, description: str = "") -> int:
-    t = f"{title} {description}".lower()
-    score = 0
-
-    if any(k in t for k in TRUMP_KEYWORDS):
-        score += 4
-    if any(k in t for k in FED_KEYWORDS):
-        score += 4
-    if any(k in t for k in WAR_KEYWORDS):
-        score += 4
-    if any(k in t for k in CRYPTO_KEYWORDS):
-        score += 2
-
-    return score
-
-
-def kategori_berita(title: str, description: str = ""):
-    t = f"{title} {description}".lower()
-    score = score_berita(title, description)
-
-    if any(k in t for k in TRUMP_KEYWORDS) and any(k in t for k in WAR_KEYWORDS):
-        return "TRUMP + PERANG", C.RED, max(score, 9)
-
-    if any(k in t for k in TRUMP_KEYWORDS) and any(k in t for k in FED_KEYWORDS):
-        return "TRUMP + EKONOMI", C.RED, max(score, 9)
-
-    if any(k in t for k in FED_KEYWORDS):
-        return "FED / MAKRO", C.YELLOW, max(score, 7)
-
-    if any(k in t for k in WAR_KEYWORDS):
-        if any(k in t for k in ["ceasefire", "truce", "de-escalation"]):
-            return "DE-ESCALATION", C.GREEN, max(score, 7)
-        return "PERANG / GEOPOLITIK", C.MAGENTA, max(score, 7)
-
-    if any(k in t for k in CRYPTO_KEYWORDS):
-        return "CRYPTO MARKET", C.CYAN, max(score, 5)
-
-    if score >= 2:
-        return "PERHATIAN", C.BLUE, score
-
-    return "INFO", C.WHITE, score
-
-
-def dampak_market(text: str):
-    t = text.lower()
-
-    if any(k in t for k in TRUMP_KEYWORDS) and any(k in t for k in ["war", "attack", "missile", "iran", "israel", "ukraine", "russia"]):
-        return {
-            "btc": "rawan volatil / bisa tertekan",
-            "wti": "cenderung naik",
-            "emas": "cenderung naik",
-            "status": "⚠️ WAIT / JANGAN ENTRY BURU-BURU",
-            "catatan": "Trump + perang = market cepat berubah.",
-        }
-
-    if any(k in t for k in TRUMP_KEYWORDS) and any(k in t for k in ["ceasefire", "truce", "de-escalation", "hormuz"]):
-        return {
-            "btc": "berpotensi terbantu",
-            "wti": "bisa melemah",
-            "emas": "bisa netral / melemah",
-            "status": "✅ PANTAU MOMENTUM RISK-ON",
-            "catatan": "De-escalation biasanya meredakan fear market.",
-        }
-
-    if any(k in t for k in ["inflation", "cpi", "ppi", "pce", "hawkish", "rate hike"]):
-        return {
-            "btc": "berpotensi tertekan",
-            "wti": "netral / tergantung konteks",
-            "emas": "campuran",
-            "status": "⚠️ VOLATILE / TUNGGU REAKSI DATA",
-            "catatan": "Data makro panas biasanya menekan aset berisiko.",
-        }
-
-    if any(k in t for k in ["rate cut", "dovish", "cooling inflation"]):
-        return {
-            "btc": "berpotensi positif",
-            "wti": "netral",
-            "emas": "bisa positif",
-            "status": "✅ BOLEH PANTAU MOMENTUM",
-            "catatan": "Sentimen risk-on bisa membaik.",
-        }
-
-    if any(k in t for k in ["war", "attack", "missile", "airstrike", "retaliation"]):
-        return {
-            "btc": "volatil / rawan fake move",
-            "wti": "cenderung naik",
-            "emas": "cenderung naik",
-            "status": "⚠️ HIGH RISK MARKET",
-            "catatan": "Perang = market tidak stabil.",
-        }
-
-    if any(k in t for k in ["ceasefire", "truce", "de-escalation"]):
-        return {
-            "btc": "bisa lebih positif",
-            "wti": "bisa turun",
-            "emas": "bisa melemah",
-            "status": "✅ RISK-ON BISA MEMBAIK",
-            "catatan": "Market biasanya lebih tenang kalau konflik mereda.",
-        }
-
-    if any(k in t for k in ["liquidation", "whale", "exchange", "stablecoin"]):
-        return {
-            "btc": "pantau reaksi harga langsung",
-            "wti": "tidak relevan",
-            "emas": "tidak relevan",
-            "status": "👀 PANTAU REAKSI BTC",
-            "catatan": "Whale hanya konfirmasi tambahan, bukan dasar entry tunggal.",
-        }
-
-    return {
-        "btc": "pantau",
-        "wti": "pantau",
-        "emas": "pantau",
-        "status": "• HANYA INFO",
-        "catatan": "Belum cukup kuat untuk dasar keputusan sendiri.",
-    }
-
-
-# =========================================================
-# FETCH
-# =========================================================
-def fetch_everything():
+def fetch_newsapi():
     if not NEWS_API_KEY:
-        print("DEBUG: NEWS_API_KEY kosong")
         return []
 
     url = "https://newsapi.org/v2/everything"
     params = {
-        "apiKey": NEWS_API_KEY,
-        "q": QUERY,
+        "q": NEWS_QUERY,
         "language": "en",
         "sortBy": "publishedAt",
-        "pageSize": PAGE_SIZE,
-    }
-
-    try:
-        response = requests.get(url, params=params, timeout=20)
-        data = response.json()
-
-        if DEBUG_MODE:
-            print("DEBUG EVERYTHING STATUS:", data.get("status"))
-            print("DEBUG EVERYTHING TOTAL:", data.get("totalResults"))
-
-        if data.get("status") != "ok":
-            if DEBUG_MODE:
-                print("DEBUG EVERYTHING FULL:", data)
-            return []
-
-        return data.get("articles", [])
-    except Exception as e:
-        print("DEBUG EVERYTHING ERROR:", e)
-        return []
-
-
-def fetch_top_headlines():
-    if not NEWS_API_KEY:
-        return []
-
-    url = "https://newsapi.org/v2/top-headlines"
-    params = {
+        "pageSize": MAX_NEWS_ITEMS,
         "apiKey": NEWS_API_KEY,
-        "language": "en",
-        "category": "business",
-        "pageSize": PAGE_SIZE,
     }
 
     try:
-        response = requests.get(url, params=params, timeout=20)
-        data = response.json()
-
-        if DEBUG_MODE:
-            print("DEBUG TOP STATUS:", data.get("status"))
-            print("DEBUG TOP TOTAL:", data.get("totalResults"))
-
-        if data.get("status") != "ok":
-            if DEBUG_MODE:
-                print("DEBUG TOP FULL:", data)
-            return []
-
-        return data.get("articles", [])
-    except Exception as e:
-        print("DEBUG TOP ERROR:", e)
+        r = requests.get(url, params=params, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+    except Exception:
         return []
 
+    articles = []
+    for a in data.get("articles", []):
+        title = normalize_text(a.get("title", ""))
+        desc = normalize_text(a.get("description", ""))
+        url = normalize_text(a.get("url", ""))
+        source = normalize_text((a.get("source") or {}).get("name", ""))
+        dt = parse_newsapi_time(a.get("publishedAt", ""))
 
-def ambil_berita():
-    top = fetch_top_headlines()
-    everything = fetch_everything()
-
-    merged = []
-    seen = set()
-
-    for b in top + everything:
-        title = bersih(b.get("title", ""))
-        url = bersih(b.get("url", ""))
-        key = f"{title}|{url}"
-
-        if not title or key in seen:
+        if not title or not url or not source or dt is None:
             continue
 
-        seen.add(key)
-        merged.append(b)
+        if source.lower() not in ALLOWED_NEWS_SOURCES:
+            continue
 
-    if DEBUG_MODE:
-        print("DEBUG MERGED COUNT:", len(merged))
+        full_text = f"{title} {desc}"
 
-    return merged
+        if text_has_blacklist(full_text):
+            continue
+
+        if not text_has_fast_keyword(full_text):
+            continue
+
+        articles.append({
+            "source_type": "news",
+            "source_name": source,
+            "title": title,
+            "text": full_text,
+            "url": url,
+            "dt": dt,
+        })
+
+    return articles
+
+
+# =========================================================
+# TWITTER VIA NITTER RSS
+# =========================================================
+def fetch_nitter_rss_for_user(username: str):
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+    }
+
+    for base in NITTER_INSTANCES:
+        rss_url = f"{base}/{username}/rss"
+        try:
+            r = requests.get(rss_url, headers=headers, timeout=20)
+            if r.status_code != 200 or not r.text.strip():
+                continue
+
+            root = ET.fromstring(r.text)
+            items = []
+
+            for item in root.findall(".//item"):
+                title = normalize_text(item.findtext("title", default=""))
+                link = normalize_text(item.findtext("link", default=""))
+                pub = normalize_text(item.findtext("pubDate", default=""))
+                desc = normalize_text(item.findtext("description", default=""))
+                dt = parse_rss_time(pub)
+
+                if not title or not link or dt is None:
+                    continue
+
+                text = f"{title} {desc}"
+
+                if text_has_blacklist(text):
+                    continue
+
+                if not text_has_fast_keyword(text):
+                    continue
+
+                items.append({
+                    "source_type": "twitter",
+                    "source_name": f"@{username}",
+                    "title": title,
+                    "text": text,
+                    "url": link,
+                    "dt": dt,
+                })
+
+            return items
+
+        except Exception:
+            continue
+
+    return []
+
+
+def fetch_twitter_whitelist():
+    all_items = []
+    for user in TWITTER_ELITE_USERS:
+        items = fetch_nitter_rss_for_user(user)
+        all_items.extend(items)
+    return all_items
+
+
+# =========================================================
+# MERGE + FILTER
+# =========================================================
+def collect_items():
+    raw = fetch_newsapi() + fetch_twitter_whitelist()
+
+    # urut paling baru
+    raw.sort(key=lambda x: x["dt"], reverse=True)
+
+    filtered = []
+    seen_local = set()
+
+    for item in raw:
+        title = item["title"]
+        url = item["url"]
+        source_type = item["source_type"]
+        source_name = item["source_name"]
+        minutes = age_minutes(item["dt"])
+
+        if minutes > MAX_AGE_MINUTES:
+            continue
+
+        uid = make_uid(source_type, source_name, title, url)
+        if uid in seen_local:
+            continue
+
+        seen_local.add(uid)
+        item["uid"] = uid
+        item["age_minutes"] = minutes
+        filtered.append(item)
+
+    return filtered
 
 
 # =========================================================
 # FORMAT
 # =========================================================
-def print_berita(kategori, warna, score, freshness_label, freshness_color, judul_indo, judul_asli, source_name, published_local, umur_text, effect):
-    print(warna + C.BOLD + f"\n[{kategori}] SCORE={score}" + C.RESET)
-    print(freshness_color + f"Fresh  : {freshness_label}" + C.RESET)
-    print(warna + f"Sumber : {source_name}" + C.RESET)
-    print(warna + f"Terbit : {published_local}" + C.RESET)
-    print(warna + f"Umur   : {umur_text}" + C.RESET)
-    print(warna + f"Judul  : {judul_indo}" + C.RESET)
-    print(C.WHITE + f"Asli   : {judul_asli}" + C.RESET)
-    print(C.CYAN + f"BTC    : {effect['btc']}" + C.RESET)
-    print(C.YELLOW + f"WTI    : {effect['wti']}" + C.RESET)
-    print(C.WHITE + f"EMAS   : {effect['emas']}" + C.RESET)
-    print(C.MAGENTA + f"Status : {effect['status']}" + C.RESET)
-    print(C.BLUE + f"Catatan: {effect['catatan']}" + C.RESET)
+def format_alert(item):
+    title_id = translate_text(item["title"])
+    bias = classify_bias(item["text"])
 
+    source_label = "TWITTER ELITE" if item["source_type"] == "twitter" else "NEWS MEDIA"
 
-def format_telegram_news(kategori, freshness_label, judul_indo, judul_asli, source_name, published_local, umur_text, url, effect):
-    return (
-        f"🚨 {kategori}\n\n"
-        f"Status Waktu:\n{freshness_label}\n\n"
-        f"Sumber:\n{source_name}\n\n"
-        f"Terbit:\n{published_local}\n\n"
-        f"Umur Berita:\n{umur_text}\n\n"
-        f"Judul Indo:\n{judul_indo}\n\n"
-        f"Judul Asli:\n{judul_asli}\n\n"
-        f"Dampak:\n"
-        f"- BTC  : {effect['btc']}\n"
-        f"- WTI  : {effect['wti']}\n"
-        f"- EMAS : {effect['emas']}\n\n"
-        f"Status:\n{effect['status']}\n\n"
-        f"Catatan:\n{effect['catatan']}\n\n"
-        f"Link:\n{url}"
-    )
+    return f"""🚨 IMPORTANT MARKET NEWS 🚨
+
+Bias:
+{bias}
+
+Sumber Tipe:
+{source_label}
+
+Sumber:
+{item["source_name"]}
+
+Umur:
+{item["age_minutes"]} menit
+
+Judul:
+{title_id}
+
+Asli:
+{item["title"]}
+
+Link:
+{item["url"]}
+"""
 
 
 # =========================================================
 # MAIN
 # =========================================================
 def main():
-    print(C.GREEN + C.BOLD + "=== NEWS BOT START ===" + C.RESET)
-    print(C.RED + "MERAH   = TRUMP + PERANG / TRUMP + EKONOMI" + C.RESET)
-    print(C.MAGENTA + "MAGENTA = PERANG / GEOPOLITIK" + C.RESET)
-    print(C.YELLOW + "KUNING  = FED / MAKRO" + C.RESET)
-    print(C.GREEN + "HIJAU   = DE-ESCALATION / FRESH" + C.RESET)
-    print(C.CYAN + "CYAN    = CRYPTO MARKET" + C.RESET)
-    print(C.GRAY + "ABU     = BERITA LAMA TAPI MASIH LAYAK" + C.RESET)
-    print(C.BLUE + f"INTERVAL= {CHECK_INTERVAL // 60} menit" + C.RESET)
-    print(C.BLUE + f"FRESH   = <= {FRESH_NEWS_AGE_MINUTES // 60} jam" + C.RESET)
-    print(C.BLUE + f"LAYAK   = <= {OK_NEWS_AGE_MINUTES // 60} jam" + C.RESET)
-    print(C.BLUE + f"MAX     = <= {MAX_NEWS_AGE_MINUTES // 60} jam" + C.RESET)
+    seen = load_seen()
+
+    print("🚀 HYBRID NEWS BOT START")
+    print("Mode: NewsAPI + Twitter Elite")
+    print(f"Interval: {CHECK_INTERVAL} detik")
+    print(f"Max umur: {MAX_AGE_MINUTES} menit")
 
     while True:
-        log("Cek berita...", C.BLUE)
+        print(f"\n[{now_str()}] Cek berita penting...")
 
-        try:
-            berita = ambil_berita()
+        items = collect_items()
+        sent = 0
+        skipped_seen = 0
 
-            items = []
-            skip_noise = 0
-            skip_too_old = 0
-            skip_seen = 0
-            skip_sent = 0
+        for item in items:
+            if item["uid"] in seen:
+                skipped_seen += 1
+                continue
 
-            for b in berita:
-                judul = bersih(b.get("title", ""))
-                desc = bersih(b.get("description", ""))
-                url = bersih(b.get("url", ""))
-                source_name = bersih((b.get("source") or {}).get("name", "-"))
-                published_at_raw = b.get("publishedAt", "")
+            msg = format_alert(item)
+            print("\n==============================")
+            print(msg)
 
-                if not judul:
-                    continue
+            send_telegram(msg)
+            seen.add(item["uid"])
+            sent += 1
 
-                if not bukan_noise(judul):
-                    skip_noise += 1
-                    continue
+        save_seen(seen)
 
-                dt_pub = parse_published_at(published_at_raw)
-                menit_umur = age_minutes(dt_pub)
+        print(f"Item lolos filter : {len(items)}")
+        print(f"Sudah pernah kirim: {skipped_seen}")
+        print(f"Telegram terkirim : {sent}")
+        print(f"Tunggu {CHECK_INTERVAL} detik...")
 
-                if menit_umur > MAX_NEWS_AGE_MINUTES:
-                    skip_too_old += 1
-                    continue
-
-                article_key = make_article_key(judul, url, source_name)
-                norm_title = normalize_title(judul)
-
-                if article_key in STATE["seen"] or norm_title in STATE["seen"]:
-                    skip_seen += 1
-                    continue
-
-                items.append({
-                    "judul": judul,
-                    "desc": desc,
-                    "url": url,
-                    "source_name": source_name,
-                    "dt_pub": dt_pub,
-                    "menit_umur": menit_umur,
-                    "article_key": article_key,
-                    "norm_title": norm_title,
-                })
-
-            items.sort(key=lambda x: x["menit_umur"])
-
-            tampil = 0
-            kirim = 0
-            fresh_count = 0
-            ok_count = 0
-            old_count = 0
-
-            for item in items[:12]:
-                judul = item["judul"]
-                desc = item["desc"]
-                url = item["url"]
-                source_name = item["source_name"]
-                dt_pub = item["dt_pub"]
-                menit_umur = item["menit_umur"]
-                article_key = item["article_key"]
-                norm_title = item["norm_title"]
-
-                published_local = local_time_str(dt_pub)
-                umur_text = age_str(menit_umur)
-                freshness_label, freshness_color = freshness_info(menit_umur)
-
-                if menit_umur <= FRESH_NEWS_AGE_MINUTES:
-                    fresh_count += 1
-                elif menit_umur <= OK_NEWS_AGE_MINUTES:
-                    ok_count += 1
-                else:
-                    old_count += 1
-
-                kategori, warna, score = kategori_berita(judul, desc)
-                judul_indo = translate(judul)
-                effect = dampak_market(f"{judul} {desc}")
-
-                print_berita(
-                    kategori,
-                    warna,
-                    score,
-                    freshness_label,
-                    freshness_color,
-                    judul_indo,
-                    judul,
-                    source_name,
-                    published_local,
-                    umur_text,
-                    effect,
-                )
-                tampil += 1
-
-                # tandai sudah terlihat agar tidak tampil ulang
-                ts_now = time.time()
-                STATE["seen"][article_key] = ts_now
-                STATE["seen"][norm_title] = ts_now
-
-                # telegram hanya kirim berita unik dan tidak terlalu lama
-                if menit_umur > TELEGRAM_MAX_AGE_MINUTES:
-                    continue
-
-                if article_key in STATE["sent"] or norm_title in STATE["sent"]:
-                    skip_sent += 1
-                    continue
-
-                if kategori in [
-                    "TRUMP + PERANG",
-                    "TRUMP + EKONOMI",
-                    "FED / MAKRO",
-                    "PERANG / GEOPOLITIK",
-                    "DE-ESCALATION",
-                    "CRYPTO MARKET",
-                    "PERHATIAN",
-                ]:
-                    pesan = format_telegram_news(
-                        kategori,
-                        freshness_label,
-                        judul_indo,
-                        judul,
-                        source_name,
-                        published_local,
-                        umur_text,
-                        url,
-                        effect,
-                    )
-                    kirim_telegram(pesan)
-                    STATE["sent"][article_key] = ts_now
-                    STATE["sent"][norm_title] = ts_now
-                    kirim += 1
-
-            prune_state(STATE)
-            save_state(STATE)
-
-            if tampil == 0:
-                print(C.YELLOW + "\n[INFO] Tidak ada berita relevan BARU dalam 48 jam terakhir." + C.RESET)
-
-            log(f"Berita tampil   : {tampil}", C.CYAN)
-            log(f"Telegram kirim  : {kirim}", C.CYAN)
-            log(f"Fresh <=6 jam   : {fresh_count}", C.GREEN)
-            log(f"Layak <=24 jam  : {ok_count}", C.YELLOW)
-            log(f"Lama <=48 jam   : {old_count}", C.GRAY)
-            log(f"Skip noise      : {skip_noise}", C.BLUE)
-            log(f"Skip >48 jam    : {skip_too_old}", C.BLUE)
-            log(f"Skip seen       : {skip_seen}", C.BLUE)
-            log(f"Skip sent       : {skip_sent}", C.BLUE)
-
-        except Exception as e:
-            print(C.RED + f"ERROR NEWS: {e}" + C.RESET)
-
-        print(C.BLUE + f"\nTunggu {CHECK_INTERVAL} detik...\n" + C.RESET)
         time.sleep(CHECK_INTERVAL)
 
 
