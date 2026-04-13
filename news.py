@@ -1,6 +1,8 @@
 import os
+import json
 import time
-from datetime import datetime, timezone
+import hashlib
+from datetime import datetime, timezone, timedelta
 
 import requests
 from deep_translator import GoogleTranslator
@@ -13,16 +15,24 @@ NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-CHECK_INTERVAL = 1800 # test dulu 60 detik. nanti kalau sudah oke ubah ke 1800
+CHECK_INTERVAL = 1800   # 30 menit
 PAGE_SIZE = 20
 
-FRESH_NEWS_AGE_MINUTES = 360    # 6 jam
-OK_NEWS_AGE_MINUTES = 1440      # 24 jam
-MAX_NEWS_AGE_MINUTES = 2880     # 48 jam
+# umur berita
+FRESH_NEWS_AGE_MINUTES = 360     # 6 jam
+OK_NEWS_AGE_MINUTES = 1440       # 24 jam
+MAX_NEWS_AGE_MINUTES = 2880      # 48 jam
+
+# telegram hanya kirim berita <= 24 jam
+TELEGRAM_MAX_AGE_MINUTES = 1440
 
 ENABLE_TELEGRAM = True
 ENABLE_TRANSLATE = True
-DEBUG_MODE = True
+DEBUG_MODE = False
+
+# simpan riwayat berita yang sudah pernah dikirim / diproses
+STATE_FILE = "news_state.json"
+STATE_KEEP_DAYS = 7
 
 QUERY = "trump OR iran OR bitcoin OR fed"
 
@@ -58,10 +68,6 @@ NOISE_KEYWORDS = [
 ]
 
 
-seen_titles = set()
-sent_titles = set()
-
-
 # =========================================================
 # WARNA TERMINAL
 # =========================================================
@@ -76,6 +82,55 @@ class C:
     GRAY = "\033[90m"
     BOLD = "\033[1m"
     RESET = "\033[0m"
+
+
+# =========================================================
+# STATE
+# =========================================================
+def load_state():
+    if not os.path.exists(STATE_FILE):
+        return {"sent": {}, "seen": {}}
+
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if not isinstance(data, dict):
+                return {"sent": {}, "seen": {}}
+            data.setdefault("sent", {})
+            data.setdefault("seen", {})
+            return data
+    except Exception:
+        return {"sent": {}, "seen": {}}
+
+
+def save_state(state):
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def prune_state(state):
+    cutoff = datetime.now(timezone.utc) - timedelta(days=STATE_KEEP_DAYS)
+    cutoff_ts = cutoff.timestamp()
+
+    for bucket in ["sent", "seen"]:
+        keys_to_delete = []
+        for k, ts in state.get(bucket, {}).items():
+            try:
+                if float(ts) < cutoff_ts:
+                    keys_to_delete.append(k)
+            except Exception:
+                keys_to_delete.append(k)
+
+        for k in keys_to_delete:
+            state[bucket].pop(k, None)
+
+
+STATE = load_state()
+prune_state(STATE)
+save_state(STATE)
 
 
 # =========================================================
@@ -162,6 +217,18 @@ def freshness_info(minutes_old: int):
     if minutes_old <= OK_NEWS_AGE_MINUTES:
         return "LAYAK <= 24 JAM", C.YELLOW
     return "LAMA <= 48 JAM", C.GRAY
+
+
+def make_article_key(title: str, url: str, source_name: str) -> str:
+    raw = f"{bersih(title).lower()}|{bersih(url).lower()}|{bersih(source_name).lower()}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def normalize_title(title: str) -> str:
+    t = bersih(title).lower()
+    for ch in [",", ".", ":", ";", "!", "?", '"', "'"]:
+        t = t.replace(ch, "")
+    return t
 
 
 # =========================================================
@@ -314,10 +381,10 @@ def fetch_everything():
         if DEBUG_MODE:
             print("DEBUG EVERYTHING STATUS:", data.get("status"))
             print("DEBUG EVERYTHING TOTAL:", data.get("totalResults"))
-            if data.get("status") != "ok":
-                print("DEBUG EVERYTHING FULL:", data)
 
         if data.get("status") != "ok":
+            if DEBUG_MODE:
+                print("DEBUG EVERYTHING FULL:", data)
             return []
 
         return data.get("articles", [])
@@ -345,10 +412,10 @@ def fetch_top_headlines():
         if DEBUG_MODE:
             print("DEBUG TOP STATUS:", data.get("status"))
             print("DEBUG TOP TOTAL:", data.get("totalResults"))
-            if data.get("status") != "ok":
-                print("DEBUG TOP FULL:", data)
 
         if data.get("status") != "ok":
+            if DEBUG_MODE:
+                print("DEBUG TOP FULL:", data)
             return []
 
         return data.get("articles", [])
@@ -443,6 +510,8 @@ def main():
             items = []
             skip_noise = 0
             skip_too_old = 0
+            skip_seen = 0
+            skip_sent = 0
 
             for b in berita:
                 judul = bersih(b.get("title", ""))
@@ -452,9 +521,6 @@ def main():
                 published_at_raw = b.get("publishedAt", "")
 
                 if not judul:
-                    continue
-
-                if judul in seen_titles:
                     continue
 
                 if not bukan_noise(judul):
@@ -468,6 +534,13 @@ def main():
                     skip_too_old += 1
                     continue
 
+                article_key = make_article_key(judul, url, source_name)
+                norm_title = normalize_title(judul)
+
+                if article_key in STATE["seen"] or norm_title in STATE["seen"]:
+                    skip_seen += 1
+                    continue
+
                 items.append({
                     "judul": judul,
                     "desc": desc,
@@ -475,6 +548,8 @@ def main():
                     "source_name": source_name,
                     "dt_pub": dt_pub,
                     "menit_umur": menit_umur,
+                    "article_key": article_key,
+                    "norm_title": norm_title,
                 })
 
             items.sort(key=lambda x: x["menit_umur"])
@@ -492,10 +567,8 @@ def main():
                 source_name = item["source_name"]
                 dt_pub = item["dt_pub"]
                 menit_umur = item["menit_umur"]
-
-                if judul in seen_titles:
-                    continue
-                seen_titles.add(judul)
+                article_key = item["article_key"]
+                norm_title = item["norm_title"]
 
                 published_local = local_time_str(dt_pub)
                 umur_text = age_str(menit_umur)
@@ -527,6 +600,19 @@ def main():
                 )
                 tampil += 1
 
+                # tandai sudah terlihat agar tidak tampil ulang
+                ts_now = time.time()
+                STATE["seen"][article_key] = ts_now
+                STATE["seen"][norm_title] = ts_now
+
+                # telegram hanya kirim berita unik dan tidak terlalu lama
+                if menit_umur > TELEGRAM_MAX_AGE_MINUTES:
+                    continue
+
+                if article_key in STATE["sent"] or norm_title in STATE["sent"]:
+                    skip_sent += 1
+                    continue
+
                 if kategori in [
                     "TRUMP + PERANG",
                     "TRUMP + EKONOMI",
@@ -535,7 +621,7 @@ def main():
                     "DE-ESCALATION",
                     "CRYPTO MARKET",
                     "PERHATIAN",
-                ] and judul not in sent_titles:
+                ]:
                     pesan = format_telegram_news(
                         kategori,
                         freshness_label,
@@ -548,11 +634,15 @@ def main():
                         effect,
                     )
                     kirim_telegram(pesan)
-                    sent_titles.add(judul)
+                    STATE["sent"][article_key] = ts_now
+                    STATE["sent"][norm_title] = ts_now
                     kirim += 1
 
+            prune_state(STATE)
+            save_state(STATE)
+
             if tampil == 0:
-                print(C.YELLOW + "\n[INFO] Tidak ada berita relevan dalam 48 jam terakhir." + C.RESET)
+                print(C.YELLOW + "\n[INFO] Tidak ada berita relevan BARU dalam 48 jam terakhir." + C.RESET)
 
             log(f"Berita tampil   : {tampil}", C.CYAN)
             log(f"Telegram kirim  : {kirim}", C.CYAN)
@@ -561,6 +651,8 @@ def main():
             log(f"Lama <=48 jam   : {old_count}", C.GRAY)
             log(f"Skip noise      : {skip_noise}", C.BLUE)
             log(f"Skip >48 jam    : {skip_too_old}", C.BLUE)
+            log(f"Skip seen       : {skip_seen}", C.BLUE)
+            log(f"Skip sent       : {skip_sent}", C.BLUE)
 
         except Exception as e:
             print(C.RED + f"ERROR NEWS: {e}" + C.RESET)
