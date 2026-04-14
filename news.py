@@ -22,47 +22,16 @@ DEBUG_MODE = True
 
 SEEN_FILE = "seen_hybrid_news.json"
 
-# Fokus market mover, tapi dibuat lebih longgar
+# Query fokus, tapi tetap cukup luas
 NEWS_QUERY = (
     '("trump" OR "white house" OR "cz" OR "binance" OR '
     '"iran" OR "israel" OR "war" OR "missile" OR "attack" OR '
     '"fed" OR "powell" OR "inflation" OR "interest rate" OR '
-    '"bitcoin" OR "btc" OR "crypto" OR "etf" OR "liquidation" OR "whale" OR "sec")'
+    '"bitcoin" OR "btc" OR "crypto" OR "etf" OR "liquidation" OR "whale" OR "sec" OR "oil" OR "opec")'
 )
 
-# Fokus NewsAPI dulu. Twitter dimatikan sementara.
+# Twitter dimatikan sementara biar fokus beresin NewsAPI dulu
 TWITTER_ELITE_USERS = []
-
-# Sumber media yang dianggap layak, dibuat lebih longgar
-ALLOWED_NEWS_SOURCES = {
-    "reuters",
-    "bloomberg",
-    "cnbc",
-    "financial times",
-    "the wall street journal",
-    "wall street journal",
-    "wsj",
-    "business insider",
-    "marketwatch",
-    "coindesk",
-    "cointelegraph",
-    "decrypt",
-    "the block",
-    "yahoo finance",
-    "barron's",
-    "axios",
-    "cnn",
-    "abc news",
-    "forbes",
-    "fortune",
-    "investing.com",
-    "slashdot.org",
-    "cna",
-    "financial post",
-    "investopedia",
-    "the street",
-    "newsweek",
-}
 
 PRIMARY_KEYWORDS = [
     "trump", "white house", "cz", "binance",
@@ -78,6 +47,13 @@ BLACKLIST_KEYWORDS = [
     "movie", "film", "music", "celebrity", "fashion", "recipe",
     "iphone", "android", "car review", "auto show", "pypi",
     "python package", "game", "gaming", "lottery", "travel"
+]
+
+LOW_QUALITY_SOURCE_HINTS = [
+    "blogspot",
+    "wordpress",
+    "forum",
+    "reddit"
 ]
 
 
@@ -170,6 +146,11 @@ def text_has_blacklist(text: str) -> bool:
     return any(k in t for k in BLACKLIST_KEYWORDS)
 
 
+def is_low_quality_source(source_name: str) -> bool:
+    s = (source_name or "").lower()
+    return any(bad in s for bad in LOW_QUALITY_SOURCE_HINTS)
+
+
 def classify_priority(text: str) -> str:
     t = (text or "").lower()
 
@@ -182,7 +163,7 @@ def classify_priority(text: str) -> str:
         high_hits += 2
     if any(x in t for x in ["fed", "powell", "inflation", "interest rate", "fomc"]):
         high_hits += 2
-    if any(x in t for x in ["bitcoin", "btc", "crypto", "etf", "liquidation", "whale", "sec"]):
+    if any(x in t for x in ["bitcoin", "btc", "crypto", "etf", "liquidation", "whale", "sec", "oil", "opec"]):
         medium_hits += 1
 
     if high_hits >= 2:
@@ -268,7 +249,8 @@ def fetch_newsapi():
         if not title or not url or not source or dt is None:
             continue
 
-        if source.lower() not in ALLOWED_NEWS_SOURCES:
+        # Filter source dilonggarkan: hanya buang yang sangat jelek
+        if is_low_quality_source(source):
             stats["skip_source"] += 1
             continue
 
@@ -278,13 +260,29 @@ def fetch_newsapi():
             stats["skip_blacklist"] += 1
             continue
 
-        # Longgarkan keyword: kalau title ATAU full text ada keyword, lolos
-        # Dan kalau ada bitcoin/crypto di full text, juga lolos
+        # Longgar: title atau full_text boleh lolos
+        # Dan kalau ada bitcoin/btc/crypto/oil di full_text juga lolos
         ft = full_text.lower()
         if not text_has_primary_keyword(title) and not text_has_primary_keyword(full_text):
-            if "bitcoin" not in ft and "btc" not in ft and "crypto" not in ft:
+            if (
+                "bitcoin" not in ft
+                and "btc" not in ft
+                and "crypto" not in ft
+                and "oil" not in ft
+                and "opec" not in ft
+            ):
                 stats["skip_keyword"] += 1
                 continue
+
+        text_lower = full_text.lower()
+        priority_boost = False
+
+        if any(k in text_lower for k in ["trump", "white house", "cz", "binance"]):
+            priority_boost = True
+        elif any(k in text_lower for k in ["war", "iran", "israel", "missile", "attack"]):
+            priority_boost = True
+        elif any(k in text_lower for k in ["fed", "powell", "interest rate", "inflation"]):
+            priority_boost = True
 
         articles.append({
             "source_type": "news",
@@ -293,6 +291,7 @@ def fetch_newsapi():
             "text": full_text,
             "url": url,
             "dt": dt,
+            "priority_boost": priority_boost,
         })
         stats["kept"] += 1
 
@@ -333,17 +332,19 @@ def collect_items():
     }
 
     for item in raw:
-        title = item["title"]
-        url = item["url"]
-        source_type = item["source_type"]
-        source_name = item["source_name"]
         minutes = age_minutes(item["dt"])
 
         if minutes > MAX_AGE_MINUTES:
             stats["skip_age"] += 1
             continue
 
-        uid = make_uid(source_type, source_name, title, url)
+        uid = make_uid(
+            item["source_type"],
+            item["source_name"],
+            item["title"],
+            item["url"],
+        )
+
         if uid in seen_local:
             stats["skip_duplicate"] += 1
             continue
@@ -352,11 +353,18 @@ def collect_items():
         item["uid"] = uid
         item["age_minutes"] = minutes
         item["priority"] = classify_priority(item["text"])
+
+        # Kalau ada priority_boost dari isi berita, paksa minimum MEDIUM
+        if item.get("priority_boost") and item["priority"] == "LOW":
+            item["priority"] = "MEDIUM"
+
         filtered.append(item)
 
-    filtered.sort(key=lambda x: (x["priority"] != "HIGH", x["age_minutes"]))
-    stats["final_kept"] = len(filtered)
+    # HIGH dulu, lalu MEDIUM, lalu umur paling baru
+    priority_rank = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+    filtered.sort(key=lambda x: (priority_rank.get(x["priority"], 9), x["age_minutes"]))
 
+    stats["final_kept"] = len(filtered)
     return filtered, stats
 
 
