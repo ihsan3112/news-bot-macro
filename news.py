@@ -3,35 +3,29 @@ import json
 import time
 import hashlib
 import requests
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from deep_translator import GoogleTranslator
 
-# =========================================================
-# CONFIG FINAL
-# =========================================================
+# ================= CONFIG =================
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-CHECK_INTERVAL = 180          # 3 menit
-MAX_AGE_MINUTES = 720         # 12 jam
-BYPASS_AGE_MINUTES = 1440     # 24 jam untuk berita super penting
-MAX_NEWS_ITEMS = 30
+CHECK_INTERVAL = 180           # 3 menit
+MAX_AGE_MINUTES = 720          # 12 jam
+BYPASS_AGE_MINUTES = 1440      # 24 jam untuk keyword sangat penting
+MAX_NEWS_ITEMS = 25
 
 ENABLE_TELEGRAM = True
 ENABLE_TRANSLATE = True
 DEBUG_MODE = True
 
-SEEN_FILE = "seen_hybrid_news.json"
+SEEN_FILE = "seen_news.json"
 RECENT_FILE = "recent_titles.json"
-RECENT_WINDOW_MINUTES = 45    # anti ulang judul mirip dalam 45 menit
+RECENT_WINDOW_MINUTES = 45
 
-NEWS_QUERY = (
-    '("trump" OR "white house" OR "cz" OR "binance" OR '
-    '"iran" OR "israel" OR "war" OR "missile" OR "attack" OR '
-    '"fed" OR "powell" OR "inflation" OR "interest rate" OR '
-    '"bitcoin" OR "btc" OR "crypto" OR "etf" OR "liquidation" OR "whale" OR "sec" OR "oil" OR "opec" OR "hormuz")'
-)
+# Query disederhanakan supaya NewsAPI tidak terlalu sempit
+QUERY = "trump OR war OR iran OR israel OR fed OR powell OR bitcoin OR btc OR crypto OR oil OR opec OR binance OR cz"
 
 PRIMARY_KEYWORDS = [
     "trump", "white house", "cz", "binance",
@@ -42,7 +36,6 @@ PRIMARY_KEYWORDS = [
     "bitcoin", "btc", "crypto", "etf", "liquidation", "whale", "sec"
 ]
 
-# berita yang benar-benar boleh bypass age normal
 BYPASS_KEYWORDS = [
     "trump", "white house", "cz", "binance",
     "iran", "israel", "war", "missile", "attack",
@@ -64,17 +57,13 @@ LOW_QUALITY_SOURCE_HINTS = [
     "reddit"
 ]
 
-
-# =========================================================
-# STATE
-# =========================================================
+# ================= STATE =================
 def load_seen():
     try:
         with open(SEEN_FILE, "r", encoding="utf-8") as f:
             return set(json.load(f))
     except Exception:
         return set()
-
 
 def save_seen(seen):
     try:
@@ -83,14 +72,12 @@ def save_seen(seen):
     except Exception:
         pass
 
-
 def load_recent():
     try:
         with open(RECENT_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return []
-
 
 def save_recent(data):
     try:
@@ -99,10 +86,7 @@ def save_recent(data):
     except Exception:
         pass
 
-
-# =========================================================
-# TELEGRAM
-# =========================================================
+# ================= TELEGRAM =================
 def send_telegram(msg: str):
     if not ENABLE_TELEGRAM:
         return
@@ -110,32 +94,23 @@ def send_telegram(msg: str):
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": msg,
-    }
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
 
     try:
         requests.post(url, json=payload, timeout=15)
     except Exception:
         pass
 
-
-# =========================================================
-# UTILS
-# =========================================================
+# ================= UTILS =================
 def now_str():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
 
 def normalize_text(text: str) -> str:
     return " ".join((text or "").strip().split())
 
-
-def make_uid(source_type: str, source_name: str, title: str, url: str) -> str:
-    raw = f"{source_type}|{source_name}|{title}|{url}".lower().strip()
+def make_uid(title: str, url: str) -> str:
+    raw = f"{title}|{url}".lower().strip()
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
 
 def parse_newsapi_time(ts: str):
     try:
@@ -143,13 +118,11 @@ def parse_newsapi_time(ts: str):
     except Exception:
         return None
 
-
 def age_minutes(dt):
     if dt is None:
         return 999999
     now = datetime.now(timezone.utc)
     return int((now - dt.astimezone(timezone.utc)).total_seconds() // 60)
-
 
 def local_time_str(dt):
     if dt is None:
@@ -159,14 +132,12 @@ def local_time_str(dt):
     except Exception:
         return "-"
 
-
 def age_text(minutes):
     if minutes < 60:
         return f"{minutes} menit"
     h = minutes // 60
     m = minutes % 60
     return f"{h} jam {m} menit"
-
 
 def translate_text(text: str) -> str:
     if not ENABLE_TRANSLATE:
@@ -176,57 +147,41 @@ def translate_text(text: str) -> str:
     except Exception:
         return text
 
-
 def text_has_primary_keyword(text: str) -> bool:
     t = (text or "").lower()
     return any(k in t for k in PRIMARY_KEYWORDS)
-
 
 def text_has_bypass_keyword(text: str) -> bool:
     t = (text or "").lower()
     return any(k in t for k in BYPASS_KEYWORDS)
 
-
 def text_has_blacklist(text: str) -> bool:
     t = (text or "").lower()
     return any(k in t for k in BLACKLIST_KEYWORDS)
-
 
 def is_low_quality_source(source_name: str) -> bool:
     s = (source_name or "").lower()
     return any(bad in s for bad in LOW_QUALITY_SOURCE_HINTS)
 
-
 def is_recent_duplicate(title: str, recent_items: list) -> bool:
-    t = normalize_text(title).lower()[:90]
+    t = normalize_text(title).lower()[:100]
     now_ts = time.time()
     for item in recent_items:
-        old_title = item.get("title", "")
-        old_time = item.get("time", 0)
-        if t == old_title and (now_ts - old_time) < RECENT_WINDOW_MINUTES * 60:
+        if t == item.get("title", "") and (now_ts - item.get("time", 0)) < RECENT_WINDOW_MINUTES * 60:
             return True
     return False
 
-
 def add_recent_title(title: str, recent_items: list):
-    t = normalize_text(title).lower()[:90]
     recent_items.append({
-        "title": t,
+        "title": normalize_text(title).lower()[:100],
         "time": time.time()
     })
 
-
 def cleanup_recent(recent_items: list):
     now_ts = time.time()
-    return [
-        x for x in recent_items
-        if (now_ts - x.get("time", 0)) < RECENT_WINDOW_MINUTES * 60
-    ]
+    return [x for x in recent_items if (now_ts - x.get("time", 0)) < RECENT_WINDOW_MINUTES * 60]
 
-
-# =========================================================
-# ANALYSIS
-# =========================================================
+# ================= ANALYSIS =================
 def classify_priority(text: str) -> str:
     t = (text or "").lower()
 
@@ -247,7 +202,6 @@ def classify_priority(text: str) -> str:
     if high_hits >= 1 or medium_hits >= 1:
         return "MEDIUM"
     return "LOW"
-
 
 def classify_bias(text: str) -> str:
     t = (text or "").lower()
@@ -279,29 +233,20 @@ def classify_bias(text: str) -> str:
         return "LONG BIAS"
     return "WARNING / PANTAU"
 
-
 def classify_kelayakan(priority: str, minutes: int, text: str) -> str:
     if minutes <= 60:
         return "SANGAT LAYAK"
-
     if minutes <= 180:
         return "LAYAK" if priority in ("HIGH", "MEDIUM") else "HATI-HATI"
-
     if minutes <= 360:
         return "HATI-HATI" if priority == "HIGH" else "KURANG IDEAL"
-
     if minutes <= 720:
         return "KURANG IDEAL" if priority == "HIGH" else "TELAT"
-
     if minutes <= 1440 and text_has_bypass_keyword(text):
         return "TELAT TAPI MASIH PENTING"
-
     return "TELAT"
 
-
-# =========================================================
-# NEWSAPI FETCH
-# =========================================================
+# ================= FETCH NEWS =================
 def fetch_newsapi():
     empty_stats = {
         "raw_total": 0,
@@ -312,25 +257,31 @@ def fetch_newsapi():
     }
 
     if not NEWS_API_KEY:
+        print("DEBUG: NEWS_API_KEY kosong")
         return [], empty_stats
-
-    from_time = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
 
     url = "https://newsapi.org/v2/everything"
     params = {
-        "q": NEWS_QUERY,
+        "q": QUERY,
         "language": "en",
         "sortBy": "publishedAt",
         "pageSize": MAX_NEWS_ITEMS,
-        "from": from_time,
-        "apiKey": NEWS_API_KEY,
+        "apiKey": NEWS_API_KEY
     }
 
     try:
         r = requests.get(url, params=params, timeout=20)
-        r.raise_for_status()
         data = r.json()
-    except Exception:
+    except Exception as e:
+        print("DEBUG request error:", e)
+        return [], empty_stats
+
+    if DEBUG_MODE:
+        print("DEBUG status       :", data.get("status"))
+        print("DEBUG totalResults :", data.get("totalResults"))
+        print("DEBUG message      :", data.get("message"))
+
+    if data.get("status") != "ok":
         return [], empty_stats
 
     stats = dict(empty_stats)
@@ -370,25 +321,20 @@ def fetch_newsapi():
                 continue
 
         articles.append({
-            "source_type": "news",
-            "source_name": source,
             "title": title,
             "text": full_text,
             "url": url,
             "dt": dt,
+            "source_name": source,
         })
         stats["kept"] += 1
 
     return articles, stats
 
-
-# =========================================================
-# MERGE + FILTER
-# =========================================================
+# ================= MAIN FILTER =================
 def collect_items():
     news_items, news_stats = fetch_newsapi()
-    raw = news_items
-    raw.sort(key=lambda x: x["dt"], reverse=True)
+    raw = sorted(news_items, key=lambda x: x["dt"], reverse=True)
 
     filtered = []
     seen_local = set()
@@ -410,18 +356,12 @@ def collect_items():
         minutes = age_minutes(item["dt"])
         text = item["text"]
 
-        # normal 12 jam, bypass 24 jam untuk berita sangat penting
         if minutes > MAX_AGE_MINUTES:
             if not (minutes <= BYPASS_AGE_MINUTES and text_has_bypass_keyword(text)):
                 stats["skip_age"] += 1
                 continue
 
-        uid = make_uid(
-            item["source_type"],
-            item["source_name"],
-            item["title"],
-            item["url"],
-        )
+        uid = make_uid(item["title"], item["url"])
 
         if uid in seen_local:
             stats["skip_duplicate"] += 1
@@ -444,8 +384,7 @@ def collect_items():
         filtered.append(item)
         add_recent_title(item["title"], recent_items)
 
-    recent_items = cleanup_recent(recent_items)
-    save_recent(recent_items)
+    save_recent(cleanup_recent(recent_items))
 
     priority_rank = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
     filtered.sort(key=lambda x: (priority_rank.get(x["priority"], 9), x["age_minutes"]))
@@ -453,13 +392,8 @@ def collect_items():
     stats["final_kept"] = len(filtered)
     return filtered, stats
 
-
-# =========================================================
-# FORMAT
-# =========================================================
+# ================= FORMAT =================
 def format_alert(item):
-    title_id = translate_text(item["title"])
-
     return f"""🚨 IMPORTANT MARKET NEWS 🚨
 
 Priority:
@@ -481,7 +415,7 @@ Umur:
 {item["age_text"]}
 
 Judul:
-{title_id}
+{translate_text(item["title"])}
 
 Asli:
 {item["title"]}
@@ -490,15 +424,11 @@ Link:
 {item["url"]}
 """
 
-
-# =========================================================
-# MAIN
-# =========================================================
+# ================= MAIN =================
 def main():
     seen = load_seen()
 
     print("🚀 NEWS BOT START")
-    print("Mode: NewsAPI focus final")
     print(f"Interval: {CHECK_INTERVAL} detik")
     print(f"Max umur normal: {MAX_AGE_MINUTES} menit")
     print(f"Bypass umur: {BYPASS_AGE_MINUTES} menit")
@@ -542,7 +472,6 @@ def main():
         print(f"Tunggu {CHECK_INTERVAL} detik...")
 
         time.sleep(CHECK_INTERVAL)
-
 
 if __name__ == "__main__":
     main()
