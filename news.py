@@ -11,7 +11,7 @@ NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-CHECK_INTERVAL = 180           # 3 menit
+CHECK_INTERVAL = 900         # 3 menit
 MAX_AGE_MINUTES = 720          # 12 jam
 BYPASS_AGE_MINUTES = 1440      # 24 jam untuk keyword sangat penting
 MAX_NEWS_ITEMS = 25
