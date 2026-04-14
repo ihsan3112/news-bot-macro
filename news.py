@@ -15,23 +15,24 @@ NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-CHECK_INTERVAL = 180       # 3 menit
-MAX_AGE_MINUTES = 240      # hanya <= 4 jam
-MAX_NEWS_ITEMS = 12
+CHECK_INTERVAL = 180          # 3 menit
+MAX_AGE_MINUTES = 360         # 6 jam
+MAX_NEWS_ITEMS = 30
 ENABLE_TELEGRAM = True
 ENABLE_TRANSLATE = True
+DEBUG_MODE = True
 
 SEEN_FILE = "seen_hybrid_news.json"
 
-# Query NewsAPI: fokus market mover
+# Query dibuat fokus, tapi tidak terlalu sempit
 NEWS_QUERY = (
     '("trump" OR "white house" OR "cz" OR "binance" OR '
     '"iran" OR "israel" OR "war" OR "missile" OR "attack" OR '
     '"fed" OR "powell" OR "inflation" OR "interest rate" OR '
-    '"bitcoin" OR "btc" OR "etf" OR "liquidation" OR "whale" OR "sec")'
+    '"bitcoin" OR "btc" OR "crypto" OR "etf" OR "liquidation" OR "whale" OR "sec")'
 )
 
-# Sumber media yang lebih layak
+# Sumber media yang dianggap layak
 ALLOWED_NEWS_SOURCES = {
     "reuters",
     "bloomberg",
@@ -51,22 +52,24 @@ ALLOWED_NEWS_SOURCES = {
     "axios",
     "cnn",
     "abc news",
+    "forbes",
+    "fortune",
+    "investing.com",
+    "slashdot.org",
+    "cna",
+    "financial post",
 }
 
-# Akun Twitter/X whitelist
-# username tanpa @
+# Akun whitelist Twitter/Nitter
 TWITTER_ELITE_USERS = [
-    "realDonaldTrump",
     "WhiteHouse",
-    "binance",
     "cz_binance",
+    "binance",
     "federalreserve",
-    "unusual_whales",
     "WatcherGuru",
     "tier10k",
 ]
 
-# Nitter RSS fallback instances
 NITTER_INSTANCES = [
     "https://nitter.poast.org",
     "https://nitter.privacydev.net",
@@ -74,19 +77,21 @@ NITTER_INSTANCES = [
 ]
 
 # Keyword penting
-FAST_KEYWORDS = [
+PRIMARY_KEYWORDS = [
     "trump", "white house", "cz", "binance",
     "iran", "israel", "war", "missile", "attack", "retaliation",
     "ceasefire", "truce", "hormuz", "oil", "opec",
-    "fed", "fomc", "powell", "inflation", "interest rate", "rate cut", "rate hike",
-    "bitcoin", "btc", "crypto", "etf", "liquidation", "whale", "sec", "tariff", "sanction"
+    "fed", "fomc", "powell", "inflation", "interest rate",
+    "rate cut", "rate hike", "tariff", "sanction",
+    "bitcoin", "btc", "crypto", "etf", "liquidation", "whale", "sec"
 ]
 
-# Keyword yang sering noise
+# Noise yang jelas dibuang
 BLACKLIST_KEYWORDS = [
     "sports", "football", "basketball", "baseball", "volleyball",
     "movie", "film", "music", "celebrity", "fashion", "recipe",
-    "iphone", "android", "car review", "auto show", "pypi", "python package"
+    "iphone", "android", "car review", "auto show", "pypi",
+    "python package", "game", "gaming", "lottery", "travel"
 ]
 
 
@@ -176,14 +181,36 @@ def translate_text(text: str) -> str:
         return text
 
 
-def text_has_fast_keyword(text: str) -> bool:
+def text_has_primary_keyword(text: str) -> bool:
     t = (text or "").lower()
-    return any(k in t for k in FAST_KEYWORDS)
+    return any(k in t for k in PRIMARY_KEYWORDS)
 
 
 def text_has_blacklist(text: str) -> bool:
     t = (text or "").lower()
     return any(k in t for k in BLACKLIST_KEYWORDS)
+
+
+def classify_priority(text: str) -> str:
+    t = (text or "").lower()
+
+    high_hits = 0
+    medium_hits = 0
+
+    if any(x in t for x in ["trump", "white house", "cz", "binance"]):
+        high_hits += 2
+    if any(x in t for x in ["iran", "israel", "war", "missile", "attack", "retaliation"]):
+        high_hits += 2
+    if any(x in t for x in ["fed", "powell", "inflation", "interest rate", "fomc"]):
+        high_hits += 2
+    if any(x in t for x in ["bitcoin", "btc", "crypto", "etf", "liquidation", "whale", "sec"]):
+        medium_hits += 1
+
+    if high_hits >= 2:
+        return "HIGH"
+    if high_hits >= 1 or medium_hits >= 1:
+        return "MEDIUM"
+    return "LOW"
 
 
 def classify_bias(text: str) -> str:
@@ -207,7 +234,7 @@ def classify_bias(text: str) -> str:
         long_hits += 3
     if any(x in t for x in ["etf inflow", "etf approval", "institutional buying"]):
         long_hits += 3
-    if any(x in t for x in ["binance settlement positive", "sec clarity", "whale accumulation"]):
+    if any(x in t for x in ["whale accumulation", "exchange outflow", "buyback"]):
         long_hits += 2
 
     if short_hits >= long_hits + 2 and short_hits >= 3:
@@ -222,7 +249,7 @@ def classify_bias(text: str) -> str:
 # =========================================================
 def fetch_newsapi():
     if not NEWS_API_KEY:
-        return []
+        return [], {"raw_total": 0, "kept": 0, "skip_source": 0, "skip_blacklist": 0, "skip_keyword": 0}
 
     url = "https://newsapi.org/v2/everything"
     params = {
@@ -238,7 +265,15 @@ def fetch_newsapi():
         r.raise_for_status()
         data = r.json()
     except Exception:
-        return []
+        return [], {"raw_total": 0, "kept": 0, "skip_source": 0, "skip_blacklist": 0, "skip_keyword": 0}
+
+    stats = {
+        "raw_total": len(data.get("articles", [])),
+        "kept": 0,
+        "skip_source": 0,
+        "skip_blacklist": 0,
+        "skip_keyword": 0,
+    }
 
     articles = []
     for a in data.get("articles", []):
@@ -252,14 +287,18 @@ def fetch_newsapi():
             continue
 
         if source.lower() not in ALLOWED_NEWS_SOURCES:
+            stats["skip_source"] += 1
             continue
 
         full_text = f"{title} {desc}"
 
         if text_has_blacklist(full_text):
+            stats["skip_blacklist"] += 1
             continue
 
-        if not text_has_fast_keyword(full_text):
+        # dibuat lebih longgar: title saja boleh lolos
+        if not text_has_primary_keyword(title) and not text_has_primary_keyword(full_text):
+            stats["skip_keyword"] += 1
             continue
 
         articles.append({
@@ -270,17 +309,16 @@ def fetch_newsapi():
             "url": url,
             "dt": dt,
         })
+        stats["kept"] += 1
 
-    return articles
+    return articles, stats
 
 
 # =========================================================
 # TWITTER VIA NITTER RSS
 # =========================================================
 def fetch_nitter_rss_for_user(username: str):
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
 
     for base in NITTER_INSTANCES:
         rss_url = f"{base}/{username}/rss"
@@ -307,7 +345,8 @@ def fetch_nitter_rss_for_user(username: str):
                 if text_has_blacklist(text):
                     continue
 
-                if not text_has_fast_keyword(text):
+                # dibuat lebih longgar juga
+                if not text_has_primary_keyword(title) and not text_has_primary_keyword(text):
                     continue
 
                 items.append({
@@ -329,23 +368,41 @@ def fetch_nitter_rss_for_user(username: str):
 
 def fetch_twitter_whitelist():
     all_items = []
+    per_user_counts = {}
+
     for user in TWITTER_ELITE_USERS:
         items = fetch_nitter_rss_for_user(user)
         all_items.extend(items)
-    return all_items
+        per_user_counts[user] = len(items)
+
+    return all_items, per_user_counts
 
 
 # =========================================================
 # MERGE + FILTER
 # =========================================================
 def collect_items():
-    raw = fetch_newsapi() + fetch_twitter_whitelist()
+    news_items, news_stats = fetch_newsapi()
+    twitter_items, twitter_stats = fetch_twitter_whitelist()
 
-    # urut paling baru
+    raw = news_items + twitter_items
     raw.sort(key=lambda x: x["dt"], reverse=True)
 
     filtered = []
     seen_local = set()
+
+    stats = {
+        "newsapi_raw": news_stats["raw_total"],
+        "newsapi_kept": news_stats["kept"],
+        "newsapi_skip_source": news_stats["skip_source"],
+        "newsapi_skip_blacklist": news_stats["skip_blacklist"],
+        "newsapi_skip_keyword": news_stats["skip_keyword"],
+        "twitter_kept": len(twitter_items),
+        "twitter_per_user": twitter_stats,
+        "skip_age": 0,
+        "skip_duplicate": 0,
+        "final_kept": 0,
+    }
 
     for item in raw:
         title = item["title"]
@@ -355,18 +412,25 @@ def collect_items():
         minutes = age_minutes(item["dt"])
 
         if minutes > MAX_AGE_MINUTES:
+            stats["skip_age"] += 1
             continue
 
         uid = make_uid(source_type, source_name, title, url)
         if uid in seen_local:
+            stats["skip_duplicate"] += 1
             continue
 
         seen_local.add(uid)
         item["uid"] = uid
         item["age_minutes"] = minutes
+        item["priority"] = classify_priority(item["text"])
         filtered.append(item)
 
-    return filtered
+    # prioritas tinggi dulu
+    filtered.sort(key=lambda x: (x["priority"] != "HIGH", x["age_minutes"]))
+    stats["final_kept"] = len(filtered)
+
+    return filtered, stats
 
 
 # =========================================================
@@ -375,10 +439,12 @@ def collect_items():
 def format_alert(item):
     title_id = translate_text(item["title"])
     bias = classify_bias(item["text"])
-
     source_label = "TWITTER ELITE" if item["source_type"] == "twitter" else "NEWS MEDIA"
 
     return f"""🚨 IMPORTANT MARKET NEWS 🚨
+
+Priority:
+{item["priority"]}
 
 Bias:
 {bias}
@@ -417,9 +483,21 @@ def main():
     while True:
         print(f"\n[{now_str()}] Cek berita penting...")
 
-        items = collect_items()
+        items, stats = collect_items()
         sent = 0
         skipped_seen = 0
+
+        if DEBUG_MODE:
+            print("----- DEBUG -----")
+            print(f"NewsAPI raw            : {stats['newsapi_raw']}")
+            print(f"NewsAPI kept           : {stats['newsapi_kept']}")
+            print(f"Skip source            : {stats['newsapi_skip_source']}")
+            print(f"Skip blacklist         : {stats['newsapi_skip_blacklist']}")
+            print(f"Skip keyword           : {stats['newsapi_skip_keyword']}")
+            print(f"Twitter kept           : {stats['twitter_kept']}")
+            print(f"Twitter per user       : {stats['twitter_per_user']}")
+            print(f"Skip age               : {stats['skip_age']}")
+            print(f"Skip duplicate local   : {stats['skip_duplicate']}")
 
         for item in items:
             if item["uid"] in seen:
