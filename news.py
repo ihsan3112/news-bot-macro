@@ -1,147 +1,162 @@
 import requests
 import time
-from datetime import datetime
+import json
+import os
+from datetime import datetime, timezone
 
 # =========================
 # CONFIG
 # =========================
-SYMBOL = "BTCUSDT"
-INTERVAL = 1800  # 30 menit
-LIMIT = 100
+NEWS_API_KEY = os.getenv("NEWS_API_KEY")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-BINANCE_URL = f"https://api.binance.com/api/v3/klines"
+CHECK_INTERVAL = 1800  # 30 menit
+MAX_AGE_MINUTES = 120  # 2 jam (biar gak telat)
+SEEN_FILE = "seen_news.json"
 
 # =========================
-# HELPER
+# KEYWORD PENTING (tidak terlalu sempit)
 # =========================
-def get_klines(symbol, interval, limit=100):
+KEYWORDS = [
+    "trump",
+    "cz",
+    "binance",
+    "bitcoin",
+    "crypto",
+    "fed",
+    "interest rate",
+    "war",
+    "iran",
+    "oil",
+    "inflation",
+    "geopolitics"
+]
+
+# =========================
+# LOAD SEEN
+# =========================
+def load_seen():
+    if os.path.exists(SEEN_FILE):
+        with open(SEEN_FILE, "r") as f:
+            return set(json.load(f))
+    return set()
+
+def save_seen(seen):
+    with open(SEEN_FILE, "w") as f:
+        json.dump(list(seen), f)
+
+# =========================
+# TELEGRAM
+# =========================
+def send_telegram(msg):
+    if not TELEGRAM_TOKEN:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    requests.post(url, data={
+        "chat_id": CHAT_ID,
+        "text": msg,
+        "parse_mode": "Markdown"
+    })
+
+# =========================
+# FETCH NEWS
+# =========================
+def fetch_news():
+    url = "https://newsapi.org/v2/everything"
     params = {
-        "symbol": symbol,
-        "interval": interval,
-        "limit": limit
+        "q": "crypto OR bitcoin OR trump OR war OR fed OR oil",
+        "sortBy": "publishedAt",
+        "language": "en",
+        "apiKey": NEWS_API_KEY,
+        "pageSize": 20
     }
-    res = requests.get(BINANCE_URL, params=params)
-    data = res.json()
-    return data
-
-
-def parse_candle(c):
-    return {
-        "open": float(c[1]),
-        "high": float(c[2]),
-        "low": float(c[3]),
-        "close": float(c[4]),
-        "volume": float(c[5])
-    }
-
+    res = requests.get(url, params=params)
+    return res.json()
 
 # =========================
-# ANALISA CORE
+# FILTER
 # =========================
-def analyze(candles):
-    closes = [c["close"] for c in candles]
+def is_relevant(title, desc):
+    text = (title + " " + (desc or "")).lower()
+    return any(k in text for k in KEYWORDS)
 
-    last = candles[-1]
-    prev = candles[-2]
-
-    # Struktur sederhana
-    trend = "UP" if closes[-1] > closes[-5] else "DOWN"
-
-    # Momentum
-    body = abs(last["close"] - last["open"])
-    momentum = "STRONG" if body > (last["high"] - last["low"]) * 0.6 else "WEAK"
-
-    # Volume
-    avg_vol = sum(c["volume"] for c in candles[-10:]) / 10
-    vol_state = "HIGH" if last["volume"] > avg_vol else "LOW"
-
-    # Support / Resistance kasar
-    support = min(c["low"] for c in candles[-20:])
-    resistance = max(c["high"] for c in candles[-20:])
-
-    # Posisi harga
-    if last["close"] > resistance * 0.98:
-        level = "NEAR RESIST"
-    elif last["close"] < support * 1.02:
-        level = "NEAR SUPPORT"
-    else:
-        level = "MID"
-
-    # Quality
-    if momentum == "STRONG" and vol_state == "HIGH":
-        quality = "OK"
-    elif momentum == "WEAK":
-        quality = "NOISE"
-    else:
-        quality = "PULLBACK"
-
-    # Decision logic (simple tapi efektif)
-    if trend == "UP" and quality == "OK" and level != "NEAR RESIST":
-        decision = "LONG READY"
-    elif trend == "DOWN" and quality == "OK" and level != "NEAR SUPPORT":
-        decision = "SHORT READY"
-    elif quality == "NOISE":
-        decision = "NO TRADE"
-    else:
-        decision = "WAIT"
-
-    return {
-        "trend": trend,
-        "momentum": momentum,
-        "volume": vol_state,
-        "level": level,
-        "quality": quality,
-        "decision": decision,
-        "price": last["close"],
-        "support": support,
-        "resistance": resistance
-    }
-
+def get_age_minutes(published):
+    pub = datetime.fromisoformat(published.replace("Z", "+00:00"))
+    now = datetime.now(timezone.utc)
+    return int((now - pub).total_seconds() / 60)
 
 # =========================
-# OUTPUT
-# =========================
-def print_analysis(result):
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    print("\n" + "=" * 40)
-    print(f"[{now}] BTC")
-    print("=" * 40)
-
-    print(f"Harga        : {result['price']}")
-    print(f"Trend        : {result['trend']}")
-    print(f"Momentum     : {result['momentum']}")
-    print(f"Volume       : {result['volume']}")
-    print(f"Level        : {result['level']}")
-    print(f"Support      : {round(result['support'], 2)}")
-    print(f"Resistance   : {round(result['resistance'], 2)}")
-    print(f"Quality      : {result['quality']}")
-
-    print("-" * 40)
-    print(f"AKSI BOT     : {result['decision']}")
-    print("=" * 40)
-
-
-# =========================
-# MAIN LOOP
+# MAIN
 # =========================
 def main():
-    print("=== BTC BOT START ===")
-    print(f"Interval: {INTERVAL} detik")
+    seen = load_seen()
+
+    print("=== NEWS BOT START ===")
+    print(f"Interval: {CHECK_INTERVAL} detik\n")
 
     while True:
         try:
-            raw = get_klines(SYMBOL, "5m", LIMIT)
-            candles = [parse_candle(c) for c in raw]
+            data = fetch_news()
 
-            result = analyze(candles)
-            print_analysis(result)
+            if "articles" not in data:
+                print("ERROR API:", data)
+                time.sleep(CHECK_INTERVAL)
+                continue
+
+            articles = data["articles"]
+            print(f"\n[{datetime.now()}] cek berita... total: {len(articles)}")
+
+            for a in articles:
+                title = a["title"]
+                desc = a["description"]
+                url = a["url"]
+                source = a["source"]["name"]
+                published = a["publishedAt"]
+
+                uid = url
+
+                # ❌ skip jika sudah pernah
+                if uid in seen:
+                    continue
+
+                # ❌ skip jika tidak relevan
+                if not is_relevant(title, desc):
+                    continue
+
+                # ❌ skip jika terlalu lama
+                age = get_age_minutes(published)
+                if age > MAX_AGE_MINUTES:
+                    continue
+
+                # =========================
+                # FORMAT OUTPUT
+                # =========================
+                msg = f"""
+🚨 *IMPORTANT MARKET NEWS*
+
+📰 {title}
+
+🕒 Umur: {age} menit
+📅 Rilis: {published}
+
+🌍 Sumber: {source}
+
+🔗 {url}
+"""
+
+                print(msg)
+                send_telegram(msg)
+
+                seen.add(uid)
+
+            save_seen(seen)
 
         except Exception as e:
             print("ERROR:", e)
 
-        print(f"\nTunggu {INTERVAL} detik...\n")
-        time.sleep(INTERVAL)
+        print(f"Tunggu {CHECK_INTERVAL} detik...\n")
+        time.sleep(CHECK_INTERVAL)
 
 
 if __name__ == "__main__":
