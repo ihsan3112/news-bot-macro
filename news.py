@@ -12,25 +12,16 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 CHECK_INTERVAL = 1800  # 30 menit
-MAX_AGE_MINUTES = 120  # 2 jam (biar gak telat)
+MAX_AGE_MINUTES = 360  # 6 jam
 SEEN_FILE = "seen_news.json"
 
 # =========================
-# KEYWORD PENTING (tidak terlalu sempit)
+# KEYWORD (GEO + MACRO)
 # =========================
 KEYWORDS = [
-    "trump",
-    "cz",
-    "binance",
-    "bitcoin",
-    "crypto",
-    "fed",
-    "interest rate",
-    "war",
-    "iran",
-    "oil",
-    "inflation",
-    "geopolitics"
+    "trump", "war", "iran", "oil",
+    "fed", "interest rate", "inflation",
+    "economy", "geopolitics"
 ]
 
 # =========================
@@ -65,7 +56,7 @@ def send_telegram(msg):
 def fetch_news():
     url = "https://newsapi.org/v2/everything"
     params = {
-        "q": "crypto OR bitcoin OR trump OR war OR fed OR oil",
+        "q": "trump OR war OR iran OR oil OR fed OR inflation OR economy",
         "sortBy": "publishedAt",
         "language": "en",
         "apiKey": NEWS_API_KEY,
@@ -85,6 +76,20 @@ def get_age_minutes(published):
     pub = datetime.fromisoformat(published.replace("Z", "+00:00"))
     now = datetime.now(timezone.utc)
     return int((now - pub).total_seconds() / 60)
+
+# =========================
+# PRIORITY LOGIC
+# =========================
+def get_priority(text):
+    text = text.lower()
+
+    if any(k in text for k in ["trump", "war", "iran", "oil"]):
+        return "🔥 HIGH"
+
+    if any(k in text for k in ["fed", "interest rate", "inflation"]):
+        return "⚠️ MEDIUM"
+
+    return "ℹ️ LOW"
 
 # =========================
 # MAIN
@@ -107,6 +112,8 @@ def main():
             articles = data["articles"]
             print(f"\n[{datetime.now()}] cek berita... total: {len(articles)}")
 
+            sent_count = 0
+
             for a in articles:
                 title = a["title"]
                 desc = a["description"]
@@ -116,26 +123,27 @@ def main():
 
                 uid = url
 
-                # ❌ skip jika sudah pernah
+                # skip duplicate
                 if uid in seen:
                     continue
 
-                # ❌ skip jika tidak relevan
+                # skip tidak relevan
                 if not is_relevant(title, desc):
                     continue
 
-                # ❌ skip jika terlalu lama
+                # skip terlalu lama
                 age = get_age_minutes(published)
                 if age > MAX_AGE_MINUTES:
                     continue
 
-                # =========================
-                # FORMAT OUTPUT
-                # =========================
+                priority = get_priority(title + " " + (desc or ""))
+
                 msg = f"""
-🚨 *IMPORTANT MARKET NEWS*
+🚨 *MARKET NEWS*
 
 📰 {title}
+
+{priority}
 
 🕒 Umur: {age} menit
 📅 Rilis: {published}
@@ -149,8 +157,27 @@ def main():
                 send_telegram(msg)
 
                 seen.add(uid)
+                sent_count += 1
 
             save_seen(seen)
+
+            # =========================
+            # STATUS (ANTI DIAM)
+            # =========================
+            if sent_count == 0:
+                status_msg = f"""
+📡 *STATUS NEWS BOT*
+
+⏱ {datetime.now().strftime('%H:%M:%S')}
+
+✅ Bot aktif
+📊 Total dicek: {len(articles)}
+❌ Tidak ada berita penting
+
+(filter: geopolitik & ekonomi)
+"""
+                print(status_msg)
+                send_telegram(status_msg)
 
         except Exception as e:
             print("ERROR:", e)
