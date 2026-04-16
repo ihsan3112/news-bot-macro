@@ -1,8 +1,9 @@
-import requests
-import time
-import json
 import os
+import json
+import time
+import requests
 from datetime import datetime, timezone
+from deep_translator import GoogleTranslator
 
 # =========================
 # CONFIG
@@ -11,32 +12,57 @@ NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-CHECK_INTERVAL = 1800           # 30 menit
-MAX_AGE_MINUTES = 1440          # 24 jam
+CHECK_INTERVAL = 1800          # 30 menit
+MAX_AGE_MINUTES = 1440         # 24 jam
 SEEN_FILE = "seen_news.json"
 
 # =========================
-# FILTER DASAR
+# QUERY KHUSUS CRYPTO IMPACT
 # =========================
-KEYWORDS = [
-    "trump", "white house", "iran", "israel", "war", "attack", "missile",
-    "oil", "opec", "hormuz", "blockade", "sanction", "tariff",
-    "fed", "powell", "interest rate", "inflation", "rate cut", "rate hike",
-    "economy", "economic", "recession", "slowdown", "central bank",
-    "bitcoin", "btc", "crypto", "etf", "sec", "liquidity", "market",
-    "conflict", "tensions", "supply", "demand", "policy", "geopolitics"
+NEWS_QUERY = (
+    "("
+    "bitcoin OR btc OR crypto OR cryptocurrency OR stablecoin OR etf OR sec OR binance OR cz "
+    "OR trump OR white house OR fed OR powell OR inflation OR interest rate OR recession "
+    "OR iran OR israel OR war OR attack OR missile OR hormuz OR oil OR opec "
+    "OR sanctions OR tariff OR liquidity OR risk-off OR risk on"
+    ")"
+)
+
+# =========================
+# KEYWORD FILTER
+# =========================
+# HARUS ADA minimal satu dari keyword impact ini
+CRYPTO_IMPACT_KEYWORDS = [
+    "bitcoin", "btc", "crypto", "cryptocurrency", "stablecoin", "etf", "sec",
+    "binance", "cz",
+    "trump", "white house",
+    "fed", "powell", "interest rate", "inflation", "rate cut", "rate hike", "recession",
+    "iran", "israel", "war", "attack", "missile", "conflict", "tensions",
+    "hormuz", "oil", "opec", "sanction", "sanctions", "tariff",
+    "liquidity", "risk-off", "risk on", "central bank"
 ]
 
+# tambahan kata yang menandakan berita market/global masih layak dipertimbangkan
+SUPPORTING_MARKET_WORDS = [
+    "market", "global", "economy", "economic", "macro",
+    "price", "supply", "demand", "policy", "volatility"
+]
+
+# dibuang total
 BLACKLIST = [
     "sports", "football", "basketball", "baseball", "volleyball",
     "movie", "film", "music", "celebrity", "fashion", "recipe",
-    "iphone", "android", "car review", "auto show", "pypi",
-    "python package", "game", "gaming", "lottery", "travel"
+    "iphone", "android", "car review", "auto show",
+    "game", "gaming", "lottery", "travel", "lifestyle",
+    "wedding", "dating", "food", "restaurant"
 ]
 
-FALLBACK_MARKET_WORDS = [
-    "market", "global", "economy", "economic", "price",
-    "supply", "demand", "inflation", "risk", "trade", "policy"
+# sumber lebih aman/umum dipakai
+LOW_QUALITY_SOURCE_HINTS = [
+    "blogspot",
+    "wordpress",
+    "forum",
+    "reddit"
 ]
 
 # =========================
@@ -81,16 +107,27 @@ def send_telegram(msg):
         print("ERROR TELEGRAM:", e)
 
 # =========================
+# TRANSLATE
+# =========================
+def translate_text(text):
+    if not text:
+        return ""
+    try:
+        return GoogleTranslator(source="auto", target="id").translate(text)
+    except Exception:
+        return text
+
+# =========================
 # FETCH NEWS
 # =========================
 def fetch_news():
     url = "https://newsapi.org/v2/everything"
     params = {
-        "q": "global OR economy OR market OR oil OR crypto OR fed OR inflation OR trump OR iran OR israel OR war",
+        "q": NEWS_QUERY,
         "sortBy": "publishedAt",
         "language": "en",
         "apiKey": NEWS_API_KEY,
-        "pageSize": 20
+        "pageSize": 20,
     }
 
     try:
@@ -113,33 +150,40 @@ def age_text(age):
         return f"{age} menit"
     return f"{age // 60} jam {age % 60} menit"
 
-def is_relevant(title, desc):
+def is_low_quality_source(source):
+    s = (source or "").lower()
+    return any(x in s for x in LOW_QUALITY_SOURCE_HINTS)
+
+def is_relevant_for_crypto(title, desc):
     text = (title + " " + (desc or "")).lower()
 
+    # buang total yang jelas sampah
     if any(x in text for x in BLACKLIST):
         return False
 
-    if any(x in text for x in KEYWORDS):
+    # harus ada pemicu yang mungkin berdampak ke crypto
+    if any(x in text for x in CRYPTO_IMPACT_KEYWORDS):
         return True
 
-    if any(x in text for x in FALLBACK_MARKET_WORDS):
-        return True
-
+    # fallback: kalau market/global/economy muncul TANPA keyword impact → jangan lolos
+    # karena user minta selain yang pengaruhi crypto dibuang
     return False
 
 def get_priority(text):
     text = text.lower()
 
     if any(x in text for x in [
-        "trump", "war", "iran", "israel", "attack", "missile",
+        "trump", "white house",
+        "war", "iran", "israel", "attack", "missile", "conflict", "tensions",
         "oil", "opec", "hormuz", "blockade",
-        "fed", "powell", "interest rate", "inflation"
+        "fed", "powell", "interest rate", "inflation", "rate hike", "rate cut",
+        "sec", "etf", "binance", "cz", "stablecoin"
     ]):
         return "🔥 HIGH"
 
     if any(x in text for x in [
-        "economy", "economic", "recession", "slowdown",
-        "bitcoin", "btc", "crypto", "etf", "sec", "market"
+        "bitcoin", "btc", "crypto", "cryptocurrency",
+        "recession", "economy", "liquidity", "market", "macro"
     ]):
         return "🟡 MEDIUM"
 
@@ -149,15 +193,17 @@ def get_bias(text):
     text = text.lower()
 
     if any(x in text for x in [
-        "war", "attack", "missile", "sanction", "tariff",
-        "inflation", "rate hike", "oil spike", "blockade", "risk-off"
+        "war", "attack", "missile", "sanction", "sanctions", "tariff",
+        "inflation", "rate hike", "oil spike", "blockade", "risk-off",
+        "recession", "conflict", "tensions"
     ]):
-        return "SHORT BIAS"
+        return "SHORT BIAS / RISK-OFF"
 
     if any(x in text for x in [
-        "ceasefire", "rate cut", "cooling inflation", "etf inflow", "risk on"
+        "ceasefire", "rate cut", "cooling inflation", "etf inflow",
+        "risk on", "approval", "easing"
     ]):
-        return "LONG BIAS"
+        return "LONG BIAS / RISK-ON"
 
     return "PANTAU"
 
@@ -182,9 +228,14 @@ def format_news_message(title, desc, source, published, age, url):
     bias = get_bias(full_text)
     kelayakan = get_kelayakan(age)
 
-    msg = f"""🚨 *MARKET NEWS*
+    title_id = translate_text(title)
+    desc_id = translate_text(desc) if desc else ""
 
-📰 {title}
+    msg = f"""🚨 *CRYPTO IMPACT NEWS*
+
+📰 *{title_id}*
+
+📌 {desc_id}
 
 {priority}
 📉 Bias: {bias}
@@ -225,6 +276,7 @@ def main():
             skipped_seen = 0
             skipped_old = 0
             skipped_irrelevant = 0
+            skipped_low_quality = 0
 
             for a in articles:
                 title = a.get("title", "")
@@ -234,6 +286,10 @@ def main():
                 published = a.get("publishedAt", "")
 
                 if not title or not url or not published:
+                    continue
+
+                if is_low_quality_source(source):
+                    skipped_low_quality += 1
                     continue
 
                 uid = url
@@ -251,7 +307,7 @@ def main():
                     skipped_old += 1
                     continue
 
-                if not is_relevant(title, desc):
+                if not is_relevant_for_crypto(title, desc):
                     skipped_irrelevant += 1
                     continue
 
@@ -272,13 +328,15 @@ def main():
 
             save_seen(seen)
 
+            # status hanya di log
             print("----- STATUS -----")
-            print(f"Bot aktif          : YA")
-            print(f"Total dicek        : {len(articles)}")
-            print(f"Terkirim           : {sent_count}")
-            print(f"Skip seen          : {skipped_seen}")
-            print(f"Skip terlalu lama  : {skipped_old}")
-            print(f"Skip tidak relevan : {skipped_irrelevant}")
+            print(f"Bot aktif            : YA")
+            print(f"Total dicek          : {len(articles)}")
+            print(f"Terkirim             : {sent_count}")
+            print(f"Skip seen            : {skipped_seen}")
+            print(f"Skip terlalu lama    : {skipped_old}")
+            print(f"Skip tidak relevan   : {skipped_irrelevant}")
+            print(f"Skip source jelek    : {skipped_low_quality}")
 
         except Exception as e:
             print("ERROR MAIN:", e)
