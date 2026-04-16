@@ -4,59 +4,27 @@ import json
 import os
 from datetime import datetime, timezone
 
-# =========================
-# CONFIG
-# =========================
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-CHECK_INTERVAL = 1800           # 30 menit
-MAX_AGE_MINUTES = 360           # 6 jam
+CHECK_INTERVAL = 1800
+MAX_AGE_MINUTES = 360
 SEEN_FILE = "seen_news.json"
 
-# =========================
-# SOURCE PRIORITAS
-# =========================
-ALLOWED_SOURCES = {
-    "reuters",
-    "bloomberg",
-    "bbc-news",
-    "cnn",
-    "financial-times",
-    "the-wall-street-journal",
-    "business-insider",
-    "cnbc",
-    "abc-news",
-    "the-washington-post"
-}
-
-# =========================
-# KEYWORDS
-# =========================
-IMPORTANT_KEYWORDS = [
+KEYWORDS = [
     "trump", "war", "iran", "israel", "attack", "missile",
     "oil", "opec", "fed", "powell", "interest rate", "inflation",
     "sanction", "tariff", "hormuz", "blockade", "central bank",
-    "recession", "liquidity", "conflict", "tensions"
+    "recession", "liquidity", "conflict", "tensions",
+    "economy", "economic", "crypto", "bitcoin", "btc", "etf", "sec"
 ]
 
-CONTEXT_KEYWORDS = [
-    "economy", "economic", "slowdown", "market sentiment",
-    "crypto", "bitcoin", "btc", "etf", "regulation", "sec",
-    "macro", "geopolitics", "geopolitical", "supply", "risk-off", "risk on"
+BLACKLIST = [
+    "sports", "football", "basketball", "movie", "music",
+    "celebrity", "recipe", "game", "gaming", "travel"
 ]
 
-BLACKLIST_KEYWORDS = [
-    "sports", "football", "basketball", "baseball", "volleyball",
-    "movie", "film", "music", "celebrity", "fashion", "recipe",
-    "iphone", "android", "car review", "auto show", "pypi",
-    "python package", "game", "gaming", "lottery", "travel"
-]
-
-# =========================
-# LOAD / SAVE
-# =========================
 def load_seen():
     if os.path.exists(SEEN_FILE):
         try:
@@ -73,13 +41,9 @@ def save_seen(seen):
     except Exception:
         pass
 
-# =========================
-# TELEGRAM
-# =========================
 def send_telegram(msg):
     if not TELEGRAM_TOKEN or not CHAT_ID:
         return
-
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
         requests.post(
@@ -95,21 +59,15 @@ def send_telegram(msg):
     except Exception as e:
         print("ERROR TELEGRAM:", e)
 
-# =========================
-# FETCH NEWS
-# =========================
 def fetch_news():
     url = "https://newsapi.org/v2/everything"
-
     params = {
-        "q": "(trump OR iran OR israel OR war OR oil OR fed OR inflation OR interest rate OR central bank OR recession OR crypto OR bitcoin OR btc OR etf OR sanctions OR conflict OR attack OR tensions OR supply OR liquidity)",
+        "q": "trump OR war OR iran OR israel OR oil OR fed OR inflation OR economy OR bitcoin OR crypto OR etf OR sanctions OR conflict",
         "sortBy": "publishedAt",
         "language": "en",
         "apiKey": NEWS_API_KEY,
-        "pageSize": 20,
-        "sources": ",".join(ALLOWED_SOURCES)
+        "pageSize": 20
     }
-
     try:
         res = requests.get(url, params=params, timeout=20)
         return res.json()
@@ -117,9 +75,6 @@ def fetch_news():
         print("ERROR FETCH:", e)
         return {}
 
-# =========================
-# HELPERS
-# =========================
 def get_age_minutes(published):
     pub = datetime.fromisoformat(published.replace("Z", "+00:00"))
     now = datetime.now(timezone.utc)
@@ -130,100 +85,37 @@ def age_text(age):
         return f"{age} menit"
     return f"{age // 60} jam {age % 60} menit"
 
-def classify_news(title, desc):
+def is_relevant(title, desc):
     text = (title + " " + (desc or "")).lower()
+    if any(x in text for x in BLACKLIST):
+        return False
+    return any(x in text for x in KEYWORDS)
 
-    if any(k in text for k in BLACKLIST_KEYWORDS):
-        return "BUANG"
-
-    if any(k in text for k in IMPORTANT_KEYWORDS):
-        return "PENTING"
-
-    if any(k in text for k in CONTEXT_KEYWORDS):
-        return "KONTEKS"
-
-    return "BUANG"
-
-def get_bias(text):
+def get_priority(text):
     text = text.lower()
+    if any(x in text for x in ["trump", "war", "iran", "israel", "attack", "missile", "oil", "fed", "powell"]):
+        return "🔥 HIGH"
+    if any(x in text for x in ["inflation", "interest rate", "economy", "crypto", "bitcoin", "btc", "etf"]):
+        return "🟡 MEDIUM"
+    return "ℹ️ INFO"
 
-    if any(k in text for k in ["war", "attack", "missile", "sanction", "tariff", "inflation", "rate hike", "oil spike", "conflict", "blockade"]):
-        return "SHORT BIAS"
-
-    if any(k in text for k in ["ceasefire", "rate cut", "cooling inflation", "etf inflow", "risk on"]):
-        return "LONG BIAS"
-
-    return "PANTAU"
-
-def get_kelayakan(age):
-    if age <= 60:
-        return "SANGAT LAYAK"
-    elif age <= 180:
-        return "LAYAK"
-    elif age <= 360:
-        return "HATI-HATI"
-    else:
-        return "TELAT"
-
-# =========================
-# FORMAT
-# =========================
-def format_news_message(category, title, desc, source, published, age, url):
-    full_text = (title + " " + (desc or ""))
-    bias = get_bias(full_text)
-    kelayakan = get_kelayakan(age)
-
-    if category == "PENTING":
-        icon = "🚨"
-        label = "PENTING"
-    else:
-        icon = "🟡"
-        label = "KONTEKS"
-
-    msg = f"""{icon} *NEWS {label}*
-
-📰 {title}
-
-📌 Kategori: {label}
-📉 Bias: {bias}
-⏱ Kelayakan: {kelayakan}
-
-🕒 Umur: {age_text(age)}
-📅 Rilis: {published}
-
-🌍 Sumber: {source}
-
-🔗 {url}
-"""
-    return msg
-
-# =========================
-# MAIN
-# =========================
 def main():
     seen = load_seen()
-
     print("=== NEWS BOT START ===")
     print(f"Interval: {CHECK_INTERVAL} detik")
 
     while True:
         try:
             data = fetch_news()
-
             if "articles" not in data:
                 print("ERROR API:", data)
                 time.sleep(CHECK_INTERVAL)
                 continue
 
             articles = data["articles"]
-            print(f"\n[{datetime.now()}] cek berita... total: {len(articles)}")
+            print(f"[{datetime.now()}] cek berita... total: {len(articles)}")
 
-            sent_count = 0
-            important_count = 0
-            context_count = 0
-            skipped_seen = 0
-            skipped_old = 0
-            skipped_irrelevant = 0
+            sent = 0
 
             for a in articles:
                 title = a.get("title", "")
@@ -236,9 +128,10 @@ def main():
                     continue
 
                 uid = url
-
                 if uid in seen:
-                    skipped_seen += 1
+                    continue
+
+                if not is_relevant(title, desc):
                     continue
 
                 try:
@@ -247,48 +140,30 @@ def main():
                     continue
 
                 if age > MAX_AGE_MINUTES:
-                    skipped_old += 1
                     continue
 
-                category = classify_news(title, desc)
+                priority = get_priority(title + " " + (desc or ""))
 
-                if category == "BUANG":
-                    skipped_irrelevant += 1
-                    continue
+                msg = f"""🚨 *MARKET NEWS*
 
-                msg = format_news_message(
-                    category=category,
-                    title=title,
-                    desc=desc,
-                    source=source,
-                    published=published,
-                    age=age,
-                    url=url
-                )
+📰 {title}
 
+{priority}
+
+🕒 Umur: {age_text(age)}
+📅 Rilis: {published}
+
+🌍 Sumber: {source}
+
+🔗 {url}
+"""
                 print(msg)
                 send_telegram(msg)
-
                 seen.add(uid)
-                sent_count += 1
-
-                if category == "PENTING":
-                    important_count += 1
-                elif category == "KONTEKS":
-                    context_count += 1
+                sent += 1
 
             save_seen(seen)
-
-            # status hanya ke terminal/log
-            print("----- STATUS -----")
-            print(f"Bot aktif            : YA")
-            print(f"Total dicek          : {len(articles)}")
-            print(f"Penting              : {important_count}")
-            print(f"Konteks              : {context_count}")
-            print(f"Terkirim             : {sent_count}")
-            print(f"Skip seen            : {skipped_seen}")
-            print(f"Skip terlalu lama    : {skipped_old}")
-            print(f"Skip tidak relevan   : {skipped_irrelevant}")
+            print(f"Terkirim: {sent}")
 
         except Exception as e:
             print("ERROR MAIN:", e)
