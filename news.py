@@ -11,44 +11,72 @@ NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-CHECK_INTERVAL = 1800  # 30 menit
-MAX_AGE_MINUTES = 360  # 6 jam
+CHECK_INTERVAL = 1800           # 30 menit
+MAX_AGE_MINUTES = 360           # 6 jam
 SEEN_FILE = "seen_news.json"
 
 # =========================
-# KEYWORD (GEO + MACRO)
+# KEYWORDS
 # =========================
-KEYWORDS = [
-    "trump", "war", "iran", "oil",
-    "fed", "interest rate", "inflation",
-    "economy", "geopolitics"
+IMPORTANT_KEYWORDS = [
+    "trump", "war", "iran", "israel", "attack", "missile",
+    "oil", "opec", "fed", "powell", "interest rate", "inflation",
+    "sanction", "tariff", "hormuz", "blockade"
+]
+
+CONTEXT_KEYWORDS = [
+    "economy", "economic", "recession", "slowdown",
+    "crypto", "bitcoin", "btc", "etf", "regulation", "sec",
+    "market sentiment", "macro", "geopolitics", "geopolitical"
+]
+
+BLACKLIST_KEYWORDS = [
+    "sports", "football", "basketball", "baseball", "volleyball",
+    "movie", "film", "music", "celebrity", "fashion", "recipe",
+    "iphone", "android", "car review", "auto show", "pypi",
+    "python package", "game", "gaming", "lottery", "travel"
 ]
 
 # =========================
-# LOAD SEEN
+# LOAD / SAVE
 # =========================
 def load_seen():
     if os.path.exists(SEEN_FILE):
-        with open(SEEN_FILE, "r") as f:
-            return set(json.load(f))
+        try:
+            with open(SEEN_FILE, "r", encoding="utf-8") as f:
+                return set(json.load(f))
+        except Exception:
+            return set()
     return set()
 
 def save_seen(seen):
-    with open(SEEN_FILE, "w") as f:
-        json.dump(list(seen), f)
+    try:
+        with open(SEEN_FILE, "w", encoding="utf-8") as f:
+            json.dump(list(seen), f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
 # =========================
 # TELEGRAM
 # =========================
 def send_telegram(msg):
-    if not TELEGRAM_TOKEN:
+    if not TELEGRAM_TOKEN or not CHAT_ID:
         return
+
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, data={
-        "chat_id": CHAT_ID,
-        "text": msg,
-        "parse_mode": "Markdown"
-    })
+    try:
+        requests.post(
+            url,
+            data={
+                "chat_id": CHAT_ID,
+                "text": msg,
+                "parse_mode": "Markdown",
+                "disable_web_page_preview": False
+            },
+            timeout=15
+        )
+    except Exception as e:
+        print("ERROR TELEGRAM:", e)
 
 # =========================
 # FETCH NEWS
@@ -56,40 +84,97 @@ def send_telegram(msg):
 def fetch_news():
     url = "https://newsapi.org/v2/everything"
     params = {
-        "q": "trump OR war OR iran OR oil OR fed OR inflation OR economy",
+        "q": "trump OR war OR iran OR israel OR oil OR fed OR inflation OR economy OR bitcoin OR crypto",
         "sortBy": "publishedAt",
         "language": "en",
         "apiKey": NEWS_API_KEY,
         "pageSize": 20
     }
-    res = requests.get(url, params=params)
-    return res.json()
+
+    try:
+        res = requests.get(url, params=params, timeout=20)
+        return res.json()
+    except Exception as e:
+        print("ERROR FETCH:", e)
+        return {}
 
 # =========================
-# FILTER
+# HELPERS
 # =========================
-def is_relevant(title, desc):
-    text = (title + " " + (desc or "")).lower()
-    return any(k in text for k in KEYWORDS)
-
 def get_age_minutes(published):
     pub = datetime.fromisoformat(published.replace("Z", "+00:00"))
     now = datetime.now(timezone.utc)
     return int((now - pub).total_seconds() / 60)
 
-# =========================
-# PRIORITY LOGIC
-# =========================
-def get_priority(text):
+def classify_news(title, desc):
+    text = (title + " " + (desc or "")).lower()
+
+    if any(k in text for k in BLACKLIST_KEYWORDS):
+        return "BUANG"
+
+    if any(k in text for k in IMPORTANT_KEYWORDS):
+        return "PENTING"
+
+    if any(k in text for k in CONTEXT_KEYWORDS):
+        return "KONTEKS"
+
+    return "BUANG"
+
+def get_bias(text):
     text = text.lower()
 
-    if any(k in text for k in ["trump", "war", "iran", "oil"]):
-        return "🔥 HIGH"
+    if any(k in text for k in ["war", "attack", "missile", "sanction", "tariff", "inflation", "rate hike", "oil spike"]):
+        return "SHORT BIAS"
+    if any(k in text for k in ["ceasefire", "rate cut", "cooling inflation", "etf inflow"]):
+        return "LONG BIAS"
+    return "PANTAU"
 
-    if any(k in text for k in ["fed", "interest rate", "inflation"]):
-        return "⚠️ MEDIUM"
+def get_kelayakan(age):
+    if age <= 60:
+        return "SANGAT LAYAK"
+    elif age <= 180:
+        return "LAYAK"
+    elif age <= 360:
+        return "HATI-HATI"
+    else:
+        return "TELAT"
 
-    return "ℹ️ LOW"
+def age_text(age):
+    if age < 60:
+        return f"{age} menit"
+    return f"{age // 60} jam {age % 60} menit"
+
+# =========================
+# FORMAT
+# =========================
+def format_news_message(category, title, desc, source, published, age, url):
+    full_text = (title + " " + (desc or ""))
+    bias = get_bias(full_text)
+    kelayakan = get_kelayakan(age)
+
+    if category == "PENTING":
+        icon = "🚨"
+        label = "PENTING"
+    else:
+        icon = "🟡"
+        label = "KONTEKS"
+
+    msg = f"""{icon} *NEWS {label}*
+
+📰 {title}
+
+📌 Kategori: {label}
+📉 Bias: {bias}
+⏱ Kelayakan: {kelayakan}
+
+🕒 Umur: {age_text(age)}
+📅 Rilis: {published}
+
+🌍 Sumber: {source}
+
+🔗 {url}
+"""
+    return msg
 
 # =========================
 # MAIN
@@ -98,7 +183,7 @@ def main():
     seen = load_seen()
 
     print("=== NEWS BOT START ===")
-    print(f"Interval: {CHECK_INTERVAL} detik\n")
+    print(f"Interval: {CHECK_INTERVAL} detik")
 
     while True:
         try:
@@ -113,45 +198,45 @@ def main():
             print(f"\n[{datetime.now()}] cek berita... total: {len(articles)}")
 
             sent_count = 0
+            important_count = 0
+            context_count = 0
 
             for a in articles:
-                title = a["title"]
-                desc = a["description"]
-                url = a["url"]
-                source = a["source"]["name"]
-                published = a["publishedAt"]
+                title = a.get("title", "")
+                desc = a.get("description", "")
+                url = a.get("url", "")
+                source = a.get("source", {}).get("name", "Unknown")
+                published = a.get("publishedAt", "")
+
+                if not title or not url or not published:
+                    continue
 
                 uid = url
-
-                # skip duplicate
                 if uid in seen:
                     continue
 
-                # skip tidak relevan
-                if not is_relevant(title, desc):
+                try:
+                    age = get_age_minutes(published)
+                except Exception:
                     continue
 
-                # skip terlalu lama
-                age = get_age_minutes(published)
                 if age > MAX_AGE_MINUTES:
                     continue
 
-                priority = get_priority(title + " " + (desc or ""))
+                category = classify_news(title, desc)
 
-                msg = f"""
-🚨 *MARKET NEWS*
+                if category == "BUANG":
+                    continue
 
-📰 {title}
-
-{priority}
-
-🕒 Umur: {age} menit
-📅 Rilis: {published}
-
-🌍 Sumber: {source}
-
-🔗 {url}
-"""
+                msg = format_news_message(
+                    category=category,
+                    title=title,
+                    desc=desc,
+                    source=source,
+                    published=published,
+                    age=age,
+                    url=url
+                )
 
                 print(msg)
                 send_telegram(msg)
@@ -159,32 +244,34 @@ def main():
                 seen.add(uid)
                 sent_count += 1
 
+                if category == "PENTING":
+                    important_count += 1
+                elif category == "KONTEKS":
+                    context_count += 1
+
             save_seen(seen)
 
-            # =========================
-            # STATUS (ANTI DIAM)
-            # =========================
-            if sent_count == 0:
-                status_msg = f"""
-📡 *STATUS NEWS BOT*
+            # status bot tetap kirim, tapi lebih informatif
+            status_msg = f"""📡 *STATUS NEWS BOT*
 
 ⏱ {datetime.now().strftime('%H:%M:%S')}
 
 ✅ Bot aktif
 📊 Total dicek: {len(articles)}
-❌ Tidak ada berita penting
+🚨 Penting: {important_count}
+🟡 Konteks: {context_count}
+📤 Terkirim: {sent_count}
 
 (filter: geopolitik & ekonomi)
 """
-                print(status_msg)
-                send_telegram(status_msg)
+            print(status_msg)
+            send_telegram(status_msg)
 
         except Exception as e:
-            print("ERROR:", e)
+            print("ERROR MAIN:", e)
 
         print(f"Tunggu {CHECK_INTERVAL} detik...\n")
         time.sleep(CHECK_INTERVAL)
-
 
 if __name__ == "__main__":
     main()
