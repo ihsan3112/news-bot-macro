@@ -12,7 +12,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 CHECK_INTERVAL = 1800           # 30 menit
-MAX_AGE_MINUTES = 360           # 6 jam
+MAX_AGE_MINUTES = 1440          # 24 jam
 SEEN_FILE = "seen_news.json"
 
 # =========================
@@ -23,7 +23,8 @@ KEYWORDS = [
     "oil", "opec", "hormuz", "blockade", "sanction", "tariff",
     "fed", "powell", "interest rate", "inflation", "rate cut", "rate hike",
     "economy", "economic", "recession", "slowdown", "central bank",
-    "bitcoin", "btc", "crypto", "etf", "sec", "liquidity", "market"
+    "bitcoin", "btc", "crypto", "etf", "sec", "liquidity", "market",
+    "conflict", "tensions", "supply", "demand", "policy", "geopolitics"
 ]
 
 BLACKLIST = [
@@ -115,15 +116,12 @@ def age_text(age):
 def is_relevant(title, desc):
     text = (title + " " + (desc or "")).lower()
 
-    # buang yang jelas sampah
     if any(x in text for x in BLACKLIST):
         return False
 
-    # ada keyword penting → lolos
     if any(x in text for x in KEYWORDS):
         return True
 
-    # fallback market/economy related → lolos
     if any(x in text for x in FALLBACK_MARKET_WORDS):
         return True
 
@@ -170,6 +168,8 @@ def get_kelayakan(age):
         return "LAYAK"
     elif age <= 360:
         return "HATI-HATI"
+    elif age <= 720:
+        return "TELAT RINGAN"
     else:
         return "TELAT"
 
@@ -207,6 +207,7 @@ def main():
 
     print("=== NEWS BOT START ===")
     print(f"Interval: {CHECK_INTERVAL} detik")
+    print(f"Max umur berita: {MAX_AGE_MINUTES} menit")
 
     while True:
         try:
@@ -271,7 +272,6 @@ def main():
 
             save_seen(seen)
 
-            # status hanya di log
             print("----- STATUS -----")
             print(f"Bot aktif          : YA")
             print(f"Total dicek        : {len(articles)}")
