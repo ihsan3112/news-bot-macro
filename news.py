@@ -17,54 +17,82 @@ MAX_AGE_MINUTES = 1440         # 24 jam
 SEEN_FILE = "seen_news.json"
 
 # =========================
-# QUERY KHUSUS CRYPTO IMPACT
+# QUERY
+# Fokus ambil berita yang mungkin relevan ke crypto/macro
 # =========================
 NEWS_QUERY = (
     "("
     "bitcoin OR btc OR crypto OR cryptocurrency OR stablecoin OR etf OR sec OR binance OR cz "
-    "OR trump OR white house OR fed OR powell OR inflation OR interest rate OR recession "
-    "OR iran OR israel OR war OR attack OR missile OR hormuz OR oil OR opec "
-    "OR sanctions OR tariff OR liquidity OR risk-off OR risk on"
+    "OR trump OR fed OR powell OR inflation OR interest rate OR rate hike OR rate cut "
+    "OR recession OR economy OR market OR oil OR opec OR hormuz OR iran OR israel "
+    "OR tariff OR sanctions OR liquidity OR risk-off OR risk on OR regulation"
     ")"
 )
 
 # =========================
-# KEYWORD FILTER
+# GATE 1 - DIRECT CRYPTO
 # =========================
-CRYPTO_IMPACT_KEYWORDS = [
-    "bitcoin", "btc", "crypto", "cryptocurrency", "stablecoin", "etf", "sec",
-    "binance", "cz",
-    "trump", "white house",
-    "fed", "powell", "interest rate", "inflation", "rate cut", "rate hike", "recession",
-    "iran", "israel", "war", "attack", "missile", "conflict", "tensions",
-    "hormuz", "oil", "opec", "sanction", "sanctions", "tariff",
-    "liquidity", "risk-off", "risk on", "central bank"
-]
-
-SUPPORTING_MARKET_WORDS = [
-    "market", "global", "economy", "economic", "macro",
-    "price", "supply", "demand", "policy", "volatility"
-]
-
-BLACKLIST = [
-    "sports", "football", "basketball", "baseball", "volleyball",
-    "movie", "film", "music", "celebrity", "fashion", "recipe",
-    "iphone", "android", "car review", "auto show",
-    "game", "gaming", "lottery", "travel", "lifestyle",
-    "wedding", "dating", "food", "restaurant"
+DIRECT_CRYPTO_KEYWORDS = [
+    "bitcoin", "btc", "crypto", "cryptocurrency", "stablecoin",
+    "etf", "bitcoin etf", "spot etf", "sec",
+    "binance", "cz", "exchange", "crypto exchange",
+    "crypto regulation", "digital asset", "digital assets",
+    "token", "tokens", "blockchain", "wallet",
+    "ethereum", "eth", "solana", "xrp"
 ]
 
 # =========================
-# FILTER KONTEXT OLAHRAGA
+# GATE 2 - TRUMP
+# Trump tidak otomatis lolos.
+# Harus ada konteks market/macro/risk
 # =========================
-SPORT_CONTEXT = [
-    "nba", "nfl", "mlb", "nhl", "uefa", "fifa",
-    "76ers", "celtics", "lakers", "warriors", "heat", "magic",
-    "playoff", "playoffs", "regular season", "match", "matches",
-    "team", "player", "players", "coach", "club", "league",
-    "goal", "goals", "score", "scored", "points", "wins", "win", "lose", "lost",
-    "quarterfinal", "semifinal", "final",
-    "touchdown", "home run"
+TRUMP_KEYWORDS = [
+    "trump", "donald trump", "white house", "us administration"
+]
+
+TRUMP_IMPACT_WORDS = [
+    "tariff", "tariffs", "trade war", "china",
+    "sanction", "sanctions", "fed", "powell",
+    "inflation", "interest rate", "rate cut", "rate hike",
+    "economy", "economic", "market", "markets",
+    "stocks", "stock market", "bond", "bonds", "yield", "yields",
+    "oil", "opec", "risk", "risk-off", "risk on",
+    "liquidity", "volatility", "recession", "dollar", "treasury"
+]
+
+# =========================
+# GATE 3 - MACRO / GEOPOLITIK
+# Harus ada context impact ke market
+# =========================
+MACRO_GEO_KEYWORDS = [
+    "fed", "powell", "interest rate", "rate cut", "rate hike",
+    "inflation", "cpi", "ppi", "recession", "central bank",
+    "oil", "opec", "hormuz", "iran", "israel",
+    "war", "attack", "missile", "conflict", "tensions",
+    "sanction", "sanctions", "tariff", "tariffs",
+    "liquidity", "risk-off", "risk on"
+]
+
+MARKET_IMPACT_WORDS = [
+    "market", "markets", "economy", "economic", "macro",
+    "stocks", "equities", "bond", "bonds",
+    "yield", "yields", "price", "prices",
+    "investor", "investors", "trading",
+    "selloff", "rally", "volatility",
+    "risk asset", "risk appetite",
+    "dollar", "treasury", "financial conditions",
+    "global market", "global markets"
+]
+
+# =========================
+# OPTIONAL NOISE FILTER RINGAN
+# Bukan fokus utama, hanya pagar dasar
+# =========================
+NOISE_HINTS = [
+    "sports", "football", "basketball", "baseball",
+    "movie", "film", "music", "celebrity",
+    "netflix", "streaming", "k-drama", "tv show",
+    "recipe", "fashion", "dating", "wedding"
 ]
 
 LOW_QUALITY_SOURCE_HINTS = [
@@ -136,7 +164,7 @@ def fetch_news():
         "sortBy": "publishedAt",
         "language": "en",
         "apiKey": NEWS_API_KEY,
-        "pageSize": 20,
+        "pageSize": 30,
     }
 
     try:
@@ -149,6 +177,12 @@ def fetch_news():
 # =========================
 # HELPERS
 # =========================
+def contains_any(text, keywords):
+    return any(k in text for k in keywords)
+
+def count_matches(text, keywords):
+    return sum(1 for k in keywords if k in text)
+
 def get_age_minutes(published):
     pub = datetime.fromisoformat(published.replace("Z", "+00:00"))
     now = datetime.now(timezone.utc)
@@ -163,44 +197,55 @@ def is_low_quality_source(source):
     s = (source or "").lower()
     return any(x in s for x in LOW_QUALITY_SOURCE_HINTS)
 
-def has_sport_context(text):
-    text = (text or "").lower()
-    return any(x in text for x in SPORT_CONTEXT)
+# =========================
+# CORE FILTER
+# Fokus: yang masuk, bukan yang dibuang
+# =========================
+def classify_article(title, desc, source=""):
+    text = f"{title} {desc or ''} {source or ''}".lower()
 
-def is_relevant_for_crypto(title, desc):
-    text = (title + " " + (desc or "")).lower()
+    # pagar dasar ringan
+    if contains_any(text, NOISE_HINTS):
+        return False, "noise_hint"
 
-    # buang total yang jelas sampah
-    if any(x in text for x in BLACKLIST):
-        return False
+    # GATE 1: direct crypto
+    direct_hits = count_matches(text, DIRECT_CRYPTO_KEYWORDS)
+    if direct_hits >= 1:
+        return True, "direct_crypto"
 
-    # buang kalau konteks olahraga terdeteksi
-    if has_sport_context(text):
-        return False
+    # GATE 2: Trump + market impact
+    trump_hits = count_matches(text, TRUMP_KEYWORDS)
+    trump_impact_hits = count_matches(text, TRUMP_IMPACT_WORDS)
 
-    # harus ada pemicu yang mungkin berdampak ke crypto
-    if any(x in text for x in CRYPTO_IMPACT_KEYWORDS):
-        return True
+    if trump_hits >= 1 and trump_impact_hits >= 1:
+        return True, "trump_market_impact"
 
-    # fallback sengaja dimatikan agar tetap ketat:
-    # market/global/economy saja tidak cukup
-    return False
+    # GATE 3: macro/geopolitik + market impact
+    macro_hits = count_matches(text, MACRO_GEO_KEYWORDS)
+    market_hits = count_matches(text, MARKET_IMPACT_WORDS)
 
+    if macro_hits >= 1 and market_hits >= 1:
+        return True, "macro_market_impact"
+
+    return False, "not_in_focus"
+
+# =========================
+# SCORING INFO
+# =========================
 def get_priority(text):
     text = text.lower()
 
-    if any(x in text for x in [
-        "trump", "white house",
-        "war", "iran", "israel", "attack", "missile", "conflict", "tensions",
-        "oil", "opec", "hormuz", "blockade",
-        "fed", "powell", "interest rate", "inflation", "rate hike", "rate cut",
-        "sec", "etf", "binance", "cz", "stablecoin"
+    if contains_any(text, [
+        "war", "iran", "israel", "attack", "missile", "conflict",
+        "oil", "opec", "hormuz", "tariff", "sanctions",
+        "fed", "powell", "interest rate", "inflation",
+        "rate hike", "rate cut", "sec", "etf", "binance"
     ]):
         return "🔥 HIGH"
 
-    if any(x in text for x in [
-        "bitcoin", "btc", "crypto", "cryptocurrency",
-        "recession", "economy", "liquidity", "market", "macro"
+    if contains_any(text, [
+        "bitcoin", "btc", "crypto", "recession",
+        "economy", "market", "liquidity", "macro"
     ]):
         return "🟡 MEDIUM"
 
@@ -209,16 +254,16 @@ def get_priority(text):
 def get_bias(text):
     text = text.lower()
 
-    if any(x in text for x in [
-        "war", "attack", "missile", "sanction", "sanctions", "tariff",
-        "inflation", "rate hike", "oil spike", "blockade", "risk-off",
-        "recession", "conflict", "tensions"
+    if contains_any(text, [
+        "war", "attack", "missile", "sanction", "sanctions",
+        "tariff", "inflation", "rate hike", "risk-off",
+        "recession", "selloff", "conflict", "oil spike"
     ]):
         return "SHORT BIAS / RISK-OFF"
 
-    if any(x in text for x in [
-        "ceasefire", "rate cut", "cooling inflation", "etf inflow",
-        "risk on", "approval", "easing"
+    if contains_any(text, [
+        "rate cut", "cooling inflation", "approval",
+        "ceasefire", "risk on", "rally", "easing"
     ]):
         return "LONG BIAS / RISK-ON"
 
@@ -237,10 +282,10 @@ def get_kelayakan(age):
         return "TELAT"
 
 # =========================
-# FORMAT
+# FORMAT MESSAGE
 # =========================
-def format_news_message(title, desc, source, published, age, url):
-    full_text = (title + " " + (desc or ""))
+def format_news_message(title, desc, source, published, age, url, gate_reason):
+    full_text = f"{title} {desc or ''}"
     priority = get_priority(full_text)
     bias = get_bias(full_text)
     kelayakan = get_kelayakan(age)
@@ -262,6 +307,7 @@ def format_news_message(title, desc, source, published, age, url):
 📅 Rilis: {published}
 
 🌍 Sumber: {source}
+🧠 Filter: {gate_reason}
 
 🔗 {url}
 """
@@ -276,6 +322,7 @@ def main():
     print("=== NEWS BOT START ===")
     print(f"Interval: {CHECK_INTERVAL} detik")
     print(f"Max umur berita: {MAX_AGE_MINUTES} menit")
+    print("Mode filter: direct crypto / trump impact / macro impact")
 
     while True:
         try:
@@ -307,25 +354,27 @@ def main():
 
                 if is_low_quality_source(source):
                     skipped_low_quality += 1
+                    print(f"SKIP LOW QUALITY: {source} | {title}")
                     continue
 
-                uid = url
-
-                if uid in seen:
+                if url in seen:
                     skipped_seen += 1
                     continue
 
                 try:
                     age = get_age_minutes(published)
                 except Exception:
+                    print(f"SKIP INVALID DATE: {title}")
                     continue
 
                 if age > MAX_AGE_MINUTES:
                     skipped_old += 1
                     continue
 
-                if not is_relevant_for_crypto(title, desc):
+                is_ok, reason = classify_article(title, desc, source)
+                if not is_ok:
                     skipped_irrelevant += 1
+                    print(f"SKIP {reason}: {title}")
                     continue
 
                 msg = format_news_message(
@@ -334,13 +383,14 @@ def main():
                     source=source,
                     published=published,
                     age=age,
-                    url=url
+                    url=url,
+                    gate_reason=reason
                 )
 
-                print(msg)
+                print(f"SEND [{reason}]: {title}")
                 send_telegram(msg)
 
-                seen.add(uid)
+                seen.add(url)
                 sent_count += 1
 
             save_seen(seen)
@@ -351,7 +401,7 @@ def main():
             print(f"Terkirim             : {sent_count}")
             print(f"Skip seen            : {skipped_seen}")
             print(f"Skip terlalu lama    : {skipped_old}")
-            print(f"Skip tidak relevan   : {skipped_irrelevant}")
+            print(f"Skip tidak fokus     : {skipped_irrelevant}")
             print(f"Skip source jelek    : {skipped_low_quality}")
 
         except Exception as e:
