@@ -1,4 +1,4 @@
-import os
+\import os
 import json
 import time
 import requests
@@ -31,7 +31,6 @@ NEWS_QUERY = (
 # =========================
 # KEYWORD FILTER
 # =========================
-# HARUS ADA minimal satu dari keyword impact ini
 CRYPTO_IMPACT_KEYWORDS = [
     "bitcoin", "btc", "crypto", "cryptocurrency", "stablecoin", "etf", "sec",
     "binance", "cz",
@@ -42,13 +41,11 @@ CRYPTO_IMPACT_KEYWORDS = [
     "liquidity", "risk-off", "risk on", "central bank"
 ]
 
-# tambahan kata yang menandakan berita market/global masih layak dipertimbangkan
 SUPPORTING_MARKET_WORDS = [
     "market", "global", "economy", "economic", "macro",
     "price", "supply", "demand", "policy", "volatility"
 ]
 
-# dibuang total
 BLACKLIST = [
     "sports", "football", "basketball", "baseball", "volleyball",
     "movie", "film", "music", "celebrity", "fashion", "recipe",
@@ -57,7 +54,19 @@ BLACKLIST = [
     "wedding", "dating", "food", "restaurant"
 ]
 
-# sumber lebih aman/umum dipakai
+# =========================
+# FILTER KONTEXT OLAHRAGA
+# =========================
+SPORT_CONTEXT = [
+    "nba", "nfl", "mlb", "nhl", "uefa", "fifa",
+    "76ers", "celtics", "lakers", "warriors", "heat", "magic",
+    "playoff", "playoffs", "regular season", "match", "matches",
+    "team", "player", "players", "coach", "club", "league",
+    "goal", "goals", "score", "scored", "points", "wins", "win", "lose", "lost",
+    "quarterfinal", "semifinal", "final",
+    "touchdown", "home run"
+]
+
 LOW_QUALITY_SOURCE_HINTS = [
     "blogspot",
     "wordpress",
@@ -154,6 +163,10 @@ def is_low_quality_source(source):
     s = (source or "").lower()
     return any(x in s for x in LOW_QUALITY_SOURCE_HINTS)
 
+def has_sport_context(text):
+    text = (text or "").lower()
+    return any(x in text for x in SPORT_CONTEXT)
+
 def is_relevant_for_crypto(title, desc):
     text = (title + " " + (desc or "")).lower()
 
@@ -161,12 +174,16 @@ def is_relevant_for_crypto(title, desc):
     if any(x in text for x in BLACKLIST):
         return False
 
+    # buang kalau konteks olahraga terdeteksi
+    if has_sport_context(text):
+        return False
+
     # harus ada pemicu yang mungkin berdampak ke crypto
     if any(x in text for x in CRYPTO_IMPACT_KEYWORDS):
         return True
 
-    # fallback: kalau market/global/economy muncul TANPA keyword impact → jangan lolos
-    # karena user minta selain yang pengaruhi crypto dibuang
+    # fallback sengaja dimatikan agar tetap ketat:
+    # market/global/economy saja tidak cukup
     return False
 
 def get_priority(text):
@@ -328,7 +345,6 @@ def main():
 
             save_seen(seen)
 
-            # status hanya di log
             print("----- STATUS -----")
             print(f"Bot aktif            : YA")
             print(f"Total dicek          : {len(articles)}")
